@@ -75,6 +75,10 @@ const STYLES = `
   @media (prefers-color-scheme: dark) { .ops thead th { background: #0d1117; } }
   .ops h2 { scroll-margin-top: 1rem; }
   .note { display: block; color: #57606a; font-size: .82rem; margin-top: .15rem; }
+  .null { color: #57606a; font-style: italic; }
+  .scroller { overflow-x: auto; margin: 1.25rem 0; }
+  .scroller table { min-width: 100%; }
+  .scroller td { white-space: nowrap; }
   .pill { display: inline-block; white-space: nowrap; font-size: .72rem; line-height: 1.5;
           padding: 0 .45rem; border: 1px solid; border-radius: 999px; }
   .pill-supported { color: #1a7f37; border-color: #1a7f37; background: #eaf6ec; }

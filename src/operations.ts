@@ -150,6 +150,11 @@ export const GROUPS: OperationGroup[] = [
       { syntax: 'GET /', behaviour: 'The landing page: what this is, and how to connect.', status: 'supported' },
       { syntax: 'GET /operations', behaviour: 'This page.', status: 'supported' },
       {
+        syntax: 'GET /browse/:database/:schema[/:table]',
+        behaviour: 'Catalog browser: objects, row counts, and a preview of the first rows of any table or view.',
+        status: 'supported',
+      },
+      {
         syntax: 'GET /_snowtest/health',
         behaviour: 'Liveness probe, with both the emulated Snowflake version and the snowtest version.',
         status: 'supported',

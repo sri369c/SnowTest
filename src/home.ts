@@ -75,7 +75,7 @@ export function renderHome(
       .flatMap((db) =>
         db.schemas.map(
           (schema) =>
-            `    <tr><td><code>${escapeHtml(db.name)}</code></td><td><code>${escapeHtml(schema.name)}</code></td><td>${schema.tables}</td><td>${schema.views}</td></tr>`,
+            `    <tr><td><code>${escapeHtml(db.name)}</code></td><td><a href="/browse/${encodeURIComponent(db.name)}/${encodeURIComponent(schema.name)}"><code>${escapeHtml(schema.name)}</code></a></td><td>${schema.tables}</td><td>${schema.views}</td></tr>`,
         ),
       )
       .join('\n') || '    <tr><td colspan="4">No databases yet.</td></tr>';
@@ -118,6 +118,7 @@ export function renderHome(
   <tr><th>Database</th><th>Schema</th><th>Tables</th><th>Views</th></tr>
 ${databaseRows}
 </table>
+<p class="muted">Select a schema to list its tables and preview the first rows of any of them.</p>
 
 <h3>Active sessions</h3>
 <table>

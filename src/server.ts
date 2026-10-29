@@ -16,10 +16,17 @@ import { gunzipSync, inflateSync } from 'node:zlib';
 
 import { Hono, type Context } from 'hono';
 
-import { Catalog } from './catalog.js';
+import { Catalog, normalizeName } from './catalog.js';
 import { loadConfig, type SnowtestConfig } from './config.js';
-import { Engine, type EngineConnection } from './engine.js';
+import { Engine, quoteIdent, type EngineConnection } from './engine.js';
 import { SnowflakeError, authError, mapEngineError, sessionExpired } from './errors.js';
+import {
+  PREVIEW_LIMIT,
+  renderMissing,
+  renderPreview,
+  renderSchema,
+  type BrowseTable,
+} from './browse.js';
 import { renderHome, type HomeDatabaseState } from './home.js';
 import { renderOperations } from './operations.js';
 import { PACKAGE_VERSION } from './version.js';
@@ -283,6 +290,99 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   // The reference the landing page links to. Static content, rendered from
   // `src/operations.ts` so the summary on `/` and this page share one source.
   app.get('/operations', (c) => c.html(renderOperations(SERVER_VERSION)));
+
+  // ---------------------------------------------------------------------------
+  // Catalog browser, read-only: the counts on `/` are a link into the data.
+  // Object names are resolved against the catalog, so nothing a URL carries is
+  // ever pasted into SQL; the resolved name is quoted before it is used.
+  // ---------------------------------------------------------------------------
+
+  const countRows = async (target: string): Promise<number | null> => {
+    const connection = await engine.newConnection();
+    try {
+      const result = await connection.execute(`SELECT count(*) FROM ${target}`);
+      return Number(result.rows[0]?.[0] ?? 0);
+    } catch {
+      // A view over a dropped table, or a type count() cannot handle: show no
+      // number rather than failing the whole list.
+      return null;
+    } finally {
+      connection.close();
+    }
+  };
+
+  app.get('/browse/:database/:schema', async (c) => {
+    const database = normalizeName(c.req.param('database'));
+    const schema = normalizeName(c.req.param('schema'));
+    if (!catalog.getSchema(database, schema)) {
+      return c.html(
+        renderMissing('Schema not found', `No schema ${database}.${schema} in this account.`),
+        404,
+      );
+    }
+    const objects = await engine.listTables(database, schema);
+    const tables: BrowseTable[] = [];
+    for (const object of objects) {
+      tables.push({
+        name: object.name,
+        kind: object.kind,
+        rows: await countRows(
+          `${quoteIdent(database)}.${quoteIdent(schema)}.${quoteIdent(object.name)}`,
+        ),
+      });
+    }
+    return c.html(renderSchema(database, schema, tables));
+  });
+
+  app.get('/browse/:database/:schema/:table', async (c) => {
+    const database = normalizeName(c.req.param('database'));
+    const schema = normalizeName(c.req.param('schema'));
+    if (!catalog.getSchema(database, schema)) {
+      return c.html(
+        renderMissing('Schema not found', `No schema ${database}.${schema} in this account.`),
+        404,
+      );
+    }
+    const requested = c.req.param('table').toUpperCase();
+    const object = (await engine.listTables(database, schema)).find(
+      (entry) => entry.name.toUpperCase() === requested,
+    );
+    if (!object) {
+      return c.html(
+        renderMissing(
+          'Object not found',
+          `No table or view named ${requested} in ${database}.${schema}.`,
+        ),
+        404,
+      );
+    }
+
+    const target = `${quoteIdent(database)}.${quoteIdent(schema)}.${quoteIdent(object.name)}`;
+    const connection = await engine.newConnection();
+    try {
+      const total = await connection.execute(`SELECT count(*) FROM ${target}`);
+      const result = await connection.execute(`SELECT * FROM ${target} LIMIT ${PREVIEW_LIMIT}`);
+      return c.html(
+        renderPreview({
+          database,
+          schema,
+          table: object.name,
+          kind: object.kind,
+          columns: result.columns.map((column) => ({
+            name: column.name,
+            duckType: column.duckType,
+          })),
+          rows: result.rows,
+          total: Number(total.rows[0]?.[0] ?? 0),
+        }),
+      );
+    } catch (error) {
+      const message = error instanceof SnowflakeError ? error.message : String(error);
+      return c.html(renderMissing('Preview failed', message), 500);
+    } finally {
+      connection.close();
+    }
+  });
 
   // ---------------------------------------------------------------------------
   // Health / control plane
