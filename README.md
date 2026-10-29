@@ -88,7 +88,8 @@ data itself is shared across connections.
 Once it is running, the server documents itself: `/operations` lists every
 endpoint, statement and function with its gaps, and `/usage` covers
 configuration, the launcher, staged files and troubleshooting. Both are rendered
-from the running build, so they cannot describe a different version.
+from the running build, so they cannot describe a different version. Where this
+file and those pages disagree, the pages are right.
 
 ## Connecting
 
@@ -331,24 +332,29 @@ response, which is the fastest way to debug a wire-format question.
 ## Layout
 
 ```
-src/server.ts      HTTP routes: driver protocol, SQL API v2, control plane
+src/server.ts      HTTP routes: driver protocol, SQL API v2, control plane, pages
 src/meta.ts        statement router: SHOW/DESCRIBE/USE/DDL vs DuckDB
 src/engine.ts      DuckDB instance, per-session connections, catalog metadata
 src/dialect.ts     Snowflake → DuckDB SQL translation
 src/types.ts       type mapping and per-surface row encoding
 src/protocol.ts    response envelopes
 src/home.ts        the landing page served at /
+src/operations.ts  supported-operations reference at /operations, from data
+src/usage.ts       configuration and troubleshooting at /usage
+src/browse.ts      catalog browser at /browse
+src/options.ts     flags and environment, shared by --help and /usage
+src/page.ts        shared HTML shell and stylesheet
 src/catalog.ts     databases, schemas, warehouses, roles, stages
 src/session.ts     session state and parameter registry
-src/config.ts      flags and environment
+src/config.ts      defaults and environment resolution
 src/cli.ts         command-line entry point
 setup.py           container lifecycle: build, up, down, status, logs, reset
 compose.yaml       container service definition
 Dockerfile         container image build
 data/examples.sql  sample dataset
-tests/             dialect unit tests, Python connector and dbt suites
+tests/             vitest units, then the Python connector and dbt suites
 scripts/           debugging helpers
-docs/              design and usage notes
+docs/              design notes
 ```
 
 ## License
