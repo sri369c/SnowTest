@@ -21,6 +21,7 @@ import { loadConfig, type SnowtestConfig } from './config.js';
 import { Engine, type EngineConnection } from './engine.js';
 import { SnowflakeError, authError, mapEngineError, sessionExpired } from './errors.js';
 import { renderHome, type HomeDatabaseState } from './home.js';
+import { renderOperations } from './operations.js';
 import { PACKAGE_VERSION } from './version.js';
 import { StatementRouter, type Outcome } from './meta.js';
 import {
@@ -278,6 +279,10 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       }),
     );
   });
+
+  // The reference the landing page links to. Static content, rendered from
+  // `src/operations.ts` so the summary on `/` and this page share one source.
+  app.get('/operations', (c) => c.html(renderOperations(SERVER_VERSION)));
 
   // ---------------------------------------------------------------------------
   // Health / control plane

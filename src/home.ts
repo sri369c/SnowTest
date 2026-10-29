@@ -8,11 +8,13 @@
  * five-second version — what the process is, the values to connect with, and
  * the limits worth knowing before trusting it.
  *
- * Rendered inline rather than as a static asset so the runtime image keeps
- * carrying nothing but `dist/`.
+ * The "what it speaks" summary is derived from the operations table rather than
+ * written here, so the overview cannot advertise more than the reference lists.
  */
 
 import type { SnowtestConfig } from './config.js';
+import { LANDING_SURFACES } from './operations.js';
+import { escapeHtml, renderPage } from './page.js';
 import { PACKAGE_VERSION } from './version.js';
 
 /** Catalog and session snapshot shown on the landing page. */
@@ -41,13 +43,6 @@ export interface HomeState {
   stages: number;
   sessions: HomeSessionState[];
 }
-
-const escapeHtml = (value: string): string =>
-  value.replace(
-    /[&<>"']/g,
-    (ch) =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch] ?? ch,
-  );
 
 export function renderHome(
   config: SnowtestConfig,
@@ -91,58 +86,12 @@ export function renderHome(
           `    <tr><td><code>${escapeHtml(session.user)}</code></td><td><code>${escapeHtml(session.database)}.${escapeHtml(session.schema)}</code></td><td>${escapeHtml(session.role)}</td></tr>`,
       )
       .join('\n') || '    <tr><td colspan="3">No active sessions.</td></tr>';
+  const surfaceRows = LANDING_SURFACES.map(
+    (surface) =>
+      `  <tr><th scope="row"><a href="/operations#${escapeHtml(surface.id)}">${escapeHtml(surface.label)}</a></th><td>${escapeHtml(surface.summary)} <span class="muted">(${surface.supported} of ${surface.total} supported)</span></td></tr>`,
+  ).join('\n');
 
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>snowtest — Snowflake-compatible stub server</title>
-<style>
-  :root { color-scheme: light dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0 auto; padding: 2.5rem 1.25rem 4rem; max-width: 52rem;
-    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    color: #1b1f24; background: #fff;
-  }
-  @media (prefers-color-scheme: dark) {
-    body { color: #e6edf3; background: #0d1117; }
-    code, pre { background: #161b22 !important; border-color: #30363d !important; }
-    th, td { border-color: #30363d !important; }
-    .card { background: #161b22 !important; border-color: #30363d !important; }
-    a { color: #6cb6ff; }
-  }
-  h1 { font-size: 1.9rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
-  h2 { font-size: 1.15rem; margin: 2.25rem 0 .75rem; }
-  h3 { font-size: .95rem; margin: 1.5rem 0 .4rem; }
-  .muted { color: #57606a; font-size: .9rem; }
-  p { margin: .6rem 0; }
-  .tag { display: inline-block; font-size: .75rem; letter-spacing: .04em;
-         text-transform: uppercase; color: #57606a; margin-bottom: .5rem; }
-  .lede { font-size: 1.02rem; color: #57606a; }
-  .card { border: 1px solid #d0d7de; border-radius: 8px; padding: 1rem 1.15rem;
-          background: #f6f8fa; margin: 1.25rem 0; }
-  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
-  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #d0d7de; }
-  th { font-weight: 600; }
-  td:first-child { white-space: nowrap; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-         font-size: .875em; background: #f6f8fa; border: 1px solid #d0d7de;
-         border-radius: 5px; padding: .1rem .3rem; }
-  pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px;
-        padding: .85rem 1rem; overflow-x: auto; font-size: .85rem; line-height: 1.5; }
-  pre code { background: none; border: 0; padding: 0; font-size: inherit; }
-  ul { margin: .5rem 0; padding-left: 1.2rem; }
-  li { margin: .25rem 0; }
-  a { color: #0969da; }
-  .warn { border-left: 3px solid #bf8700; padding-left: .9rem; color: #57606a; }
-  footer { margin-top: 3rem; font-size: .85rem; color: #57606a; }
-</style>
-</head>
-<body>
-
-<span class="tag">snowtest ${escapeHtml(PACKAGE_VERSION)} &middot; emulating Snowflake ${escapeHtml(version)}</span>
+  const body = `<span class="tag">snowtest ${escapeHtml(PACKAGE_VERSION)} &middot; emulating Snowflake ${escapeHtml(version)}</span>
 <h1>A Snowflake-compatible stub server</h1>
 <p class="lede">
   Point a Snowflake client's host and port here and it answers the way Snowflake does —
@@ -219,13 +168,17 @@ normal way to reach this too. Add these keys to any dbt-snowflake profile:</p>
 
 <h2>What it speaks</h2>
 <table>
-  <tr><th>Surface</th><td>Notes</td></tr>
-  <tr><th>Driver protocol</th><td><code>/session/v1/login-request</code>, <code>/queries/v1/query-request</code>, heartbeat, token refresh, logout — the path the Python connector, Snowpark and JDBC-style clients use</td></tr>
-  <tr><th>SQL REST API v2</th><td><code>/api/v2/statements</code>, async handles, cancel</td></tr>
-  <tr><th>SQL execution</th><td>DuckDB behind a Snowflake dialect layer: <code>IFF</code>, <code>NVL</code>, <code>DIV0</code>, <code>DATEADD</code>, <code>DATEDIFF</code>, <code>LISTAGG</code>, <code>TO_*</code> casts, variant paths</td></tr>
-  <tr><th>Metadata</th><td><code>SHOW</code>, <code>DESCRIBE</code>, <code>USE</code>, <code>ALTER SESSION</code>, <code>information_schema</code> — what dbt and SQLAlchemy reflection need</td></tr>
-  <tr><th>Staged files</th><td><code>CREATE STAGE</code>, <code>PUT</code>, <code>GET</code>, <code>LIST</code>, <code>REMOVE</code>, <code>COPY INTO</code> over local-filesystem stages</td></tr>
+  <thead>
+    <tr><th scope="col">Surface</th><th scope="col">Notes</th></tr>
+  </thead>
+  <tbody>
+${surfaceRows}
+  </tbody>
 </table>
+<p>
+  <a href="/operations"><strong>Supported operations</strong></a> &mdash;
+  <span class="muted">every endpoint, statement and function, with what each one does and where it stops.</span>
+</p>
 
 <h2>Control plane</h2>
 <table>
@@ -248,11 +201,10 @@ normal way to reach this too. Add these keys to any dbt-snowflake profile:</p>
 </ul>
 
 <footer>
-  Full endpoint and statement list, configuration and troubleshooting live in
-  <code>docs/usage.md</code>; the protocol design is in <code>docs/design.md</code>.
-</footer>
+  The live server lists every supported operation at <a href="/operations">/operations</a>.
+  Configuration, troubleshooting and the walkthrough live in <code>docs/usage.md</code>;
+  the protocol design is in <code>docs/design.md</code>.
+</footer>`;
 
-</body>
-</html>
-`;
+  return renderPage({ title: 'snowtest — Snowflake-compatible stub server', body });
 }
