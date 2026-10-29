@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Srinivas Chaturvedula
+
+node_modules
+dist
+.venv
+.git
+.gitignore
+.github
+tests
+docs
+scripts
+data
+*.log
+__pycache__
+.DS_Store

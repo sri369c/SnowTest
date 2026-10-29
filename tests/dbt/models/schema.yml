@@ -1,0 +1,21 @@
+# Copyright (c) 2026 Srinivas Chaturvedula
+
+version: 2
+
+models:
+  - name: stg_orders
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+  - name: customer_totals
+    columns:
+      - name: total_amount
+        tests:
+          - not_null
+  - name: order_ledger
+    columns:
+      - name: order_id
+        tests:
+          - unique

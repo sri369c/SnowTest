@@ -1,0 +1,4 @@
+customer_id,customer_name,region,is_active
+1,acme,eu,true
+2,globex,us,false
+3,initech,us,true

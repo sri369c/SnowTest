@@ -1,0 +1,15 @@
+# Copyright (c) 2026 Srinivas Chaturvedula
+
+name: 'snowtest_demo'
+version: '1.0.0'
+config-version: 2
+
+profile: 'snowtest'
+
+model-paths: ['models']
+target-path: 'target'
+clean-targets: ['target', 'dbt_packages', 'logs']
+
+models:
+  snowtest_demo:
+    +materialized: view

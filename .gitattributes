@@ -1,0 +1,8 @@
+# Copyright (c) 2026 Srinivas Chaturvedula
+
+# Normalise line endings on commit, but never let a CRLF checkout break the
+# shell and Python entry points (a CRLF `set -euo pipefail` is a syntax error).
+* text=auto
+
+*.sh text eol=lf
+*.py text eol=lf

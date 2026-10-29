@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Srinivas Chaturvedula
+
+# Key-pair auth, exactly the way a service account is configured in production.
+# `host`/`port`/`protocol` point the adapter at snowtest instead of Snowflake.
+snowtest:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: SNOWTEST
+      user: DBT_SVC
+      authenticator: snowflake_jwt
+      private_key_path: "{{ env_var('SNOWTEST_DBT_KEY', 'tests/dbt/keys/rsa_key.p8') }}"
+      database: SNOWTEST
+      schema: DBT_TEST
+      warehouse: SNOWTEST_WH
+      role: SYSADMIN
+      threads: 4
+      connect_retries: 1
+      connect_timeout: 10
+      host: "{{ env_var('SNOWTEST_HOST', '127.0.0.1') }}"
+      port: "{{ env_var('SNOWTEST_PORT', '18081') | int }}"
+      protocol: http
