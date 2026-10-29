@@ -11,7 +11,7 @@
  * landing page, the counts and the tests all read from this table.
  */
 
-import { escapeHtml, renderPage } from './page.js';
+import { escapeHtml, inlineMarkup, renderPage } from './page.js';
 
 export type OperationStatus = 'supported' | 'partial' | 'unsupported';
 
@@ -149,6 +149,11 @@ export const GROUPS: OperationGroup[] = [
     rows: [
       { syntax: 'GET /', behaviour: 'The landing page: what this is, and how to connect.', status: 'supported' },
       { syntax: 'GET /operations', behaviour: 'This page.', status: 'supported' },
+      {
+        syntax: 'GET /usage',
+        behaviour: 'Configuration, the launcher, staging and troubleshooting, for the running build.',
+        status: 'supported',
+      },
       {
         syntax: 'GET /browse/:database/:schema[/:table]',
         behaviour: 'Catalog browser: objects, row counts, and a preview of the first rows of any table or view.',
@@ -414,7 +419,7 @@ export const GROUPS: OperationGroup[] = [
         status: 'supported',
       },
       {
-        syntax: 'Variant paths: `col:field.subfield`',
+        syntax: 'Variant paths: col:field.subfield',
         behaviour: '`json_extract`, or `json_extract_string` when cast to a string.',
         status: 'supported',
       },
@@ -523,14 +528,6 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
   },
 ];
 
-/**
- * Escape a value, then turn `backticked` spans into inline code. The table is
- * written in prose, so this is where the markup vocabulary ends.
- */
-export function inlineMarkup(value: string): string {
-  return escapeHtml(value).replace(/`([^`]+)`/g, '<code>$1</code>');
-}
-
 const STATUS_TEXT: Record<OperationStatus, string> = {
   supported: 'supported',
   partial: 'partial',
@@ -637,8 +634,7 @@ ${unsupportedRows}
 </div>
 
 <footer>
-  Configuration, troubleshooting and the walkthrough live in <code>docs/usage.md</code>;
-  the protocol design is in <code>docs/design.md</code>.
+  Configuration and troubleshooting are at <a href="/usage">/usage</a>.
 </footer>`;
 
   return renderPage({ title: 'snowtest — supported operations', body, bodyClass: 'wide' });

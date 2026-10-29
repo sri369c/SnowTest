@@ -12,7 +12,7 @@ services:
       - "3030:3030"
     environment:
       SNOWTEST_PORT: "3030"
-      # Set to verify key-pair logins; see docs/usage.md.
+      # Set to verify key-pair logins; see the README or the running server's /usage page.
       # SNOWTEST_JWT_PUBLIC_KEY: /keys/rsa_key.pub
     volumes:
       # Stage directories survive container replacement. To use PUT/GET from a

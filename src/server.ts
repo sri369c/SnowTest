@@ -29,6 +29,7 @@ import {
 } from './browse.js';
 import { renderHome, type HomeDatabaseState } from './home.js';
 import { renderOperations } from './operations.js';
+import { renderUsage } from './usage.js';
 import { PACKAGE_VERSION } from './version.js';
 import { StatementRouter, type Outcome } from './meta.js';
 import {
@@ -290,6 +291,10 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   // The reference the landing page links to. Static content, rendered from
   // `src/operations.ts` so the summary on `/` and this page share one source.
   app.get('/operations', (c) => c.html(renderOperations(SERVER_VERSION)));
+
+  // Configuration and troubleshooting, rendered from the same option table the
+  // CLI prints in `--help`.
+  app.get('/usage', (c) => c.html(renderUsage(SERVER_VERSION)));
 
   // ---------------------------------------------------------------------------
   // Catalog browser, read-only: the counts on `/` are a link into the data.
