@@ -202,9 +202,9 @@ ${surfaceRows}
 </ul>
 
 <footer>
-  The live server lists every supported operation at <a href="/operations">/operations</a>.
-  Configuration, troubleshooting and the walkthrough live in <code>docs/usage.md</code>;
-  the protocol design is in <code>docs/design.md</code>.
+  <a href="/operations">Supported operations</a> &middot;
+  <a href="/usage">Usage and configuration</a>.
+  Both describe the build serving this page.
 </footer>`;
 
   return renderPage({ title: 'snowtest — Snowflake-compatible stub server', body });

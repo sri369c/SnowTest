@@ -17,6 +17,14 @@ export function escapeHtml(value: string): string {
   );
 }
 
+/**
+ * Escape a value, then turn `backticked` spans into inline code. The reference
+ * tables are written as prose, and this is the whole markup vocabulary they get.
+ */
+export function inlineMarkup(value: string): string {
+  return escapeHtml(value).replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
 const STYLES = `
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }

@@ -29,7 +29,8 @@ export interface SnowtestConfig {
   verbose: boolean;
 }
 
-const DEFAULTS: SnowtestConfig = {
+/** Baseline values; `--help` and the `/usage` page render these as the defaults. */
+export const DEFAULTS: SnowtestConfig = {
   port: 8080,
   host: '0.0.0.0',
   account: 'SNOWTEST',

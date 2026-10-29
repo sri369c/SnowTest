@@ -4,7 +4,8 @@
 /** Command-line entry point: `snowtest [--port 8080]`. */
 
 import { createServer } from './server.js';
-import { loadConfig } from './config.js';
+import { loadConfig, type SnowtestConfig } from './config.js';
+import { OPTIONS, helpText } from './options.js';
 import { SERVER_VERSION } from './protocol.js';
 import { PACKAGE_VERSION } from './version.js';
 
@@ -37,41 +38,35 @@ if (flags.version === 'true') {
 }
 
 if (flags.help === 'true') {
-  console.log(`snowtest — a Snowflake-compatible stub server
-
-Usage: snowtest [options]
-
-Options:
-  --port <n>          Port to listen on (default 8080, env SNOWTEST_PORT)
-  --host <addr>       Bind address (default 0.0.0.0, env SNOWTEST_HOST)
-  --account <name>    Account name reported to clients (default SNOWTEST)
-  --database <name>   Default database (default SNOWTEST)
-  --schema <name>     Default schema (default PUBLIC)
-  --warehouse <name>  Default warehouse (default SNOWTEST_WH)
-  --verbose           Log every request
-  --version           Print the snowtest and emulated Snowflake versions
-  --help              Show this message
-
-Connect with the Python connector:
-
-  snowflake.connector.connect(
-      account="SNOWTEST", user="test", password="test",
-      host="localhost", port=8080, protocol="http",
-      database="SNOWTEST", schema="PUBLIC", warehouse="SNOWTEST_WH",
-  )
-`);
+  console.log(helpText());
   process.exit(0);
 }
 
-const config = loadConfig({
-  ...(flags.port ? { port: Number.parseInt(flags.port, 10) } : {}),
-  ...(flags.host ? { host: flags.host } : {}),
-  ...(flags.account ? { account: flags.account } : {}),
-  ...(flags.database ? { defaultDatabase: flags.database } : {}),
-  ...(flags.schema ? { defaultSchema: flags.schema } : {}),
-  ...(flags.warehouse ? { defaultWarehouse: flags.warehouse } : {}),
-  ...(flags.verbose === 'true' ? { verbose: true } : {}),
-});
+/**
+ * Map the flags onto config fields through the shared option table, so a flag
+ * that is offered by `--help` cannot be silently ignored on the way in.
+ */
+function configOverrides(parsed: Record<string, string>): Partial<SnowtestConfig> {
+  const overrides: Record<string, unknown> = {};
+  for (const option of OPTIONS) {
+    if (!option.configKey) continue;
+    const raw = parsed[option.flag.replace(/^--/, '')];
+    if (raw === undefined) continue;
+    if (option.type === 'boolean') {
+      if (raw === 'true') overrides[option.configKey] = true;
+      continue;
+    }
+    if (option.type === 'number') {
+      const parsedNumber = Number.parseInt(raw, 10);
+      if (Number.isFinite(parsedNumber)) overrides[option.configKey] = parsedNumber;
+      continue;
+    }
+    overrides[option.configKey] = raw;
+  }
+  return overrides as Partial<SnowtestConfig>;
+}
+
+const config = loadConfig(configOverrides(flags));
 
 const server = await createServer(config);
 const running = await server.listen();

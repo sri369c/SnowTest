@@ -4,13 +4,8 @@ import { describe, expect, it } from 'vitest';
 
 import type { SnowtestConfig } from '../src/config.js';
 import { renderHome } from '../src/home.js';
-import {
-  GROUPS,
-  LANDING_SURFACES,
-  UNSUPPORTED,
-  inlineMarkup,
-  renderOperations,
-} from '../src/operations.js';
+import { GROUPS, LANDING_SURFACES, UNSUPPORTED, renderOperations } from '../src/operations.js';
+import { inlineMarkup } from '../src/page.js';
 
 const STATUSES = new Set(['supported', 'partial', 'unsupported']);
 

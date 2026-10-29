@@ -83,8 +83,12 @@ curl -s -X POST 'http://localhost:3030/api/v2/statements' \
 
 Each Snowflake database maps to its own DuckDB catalog, so `DB.SCHEMA.TABLE`
 resolves natively and `USE DATABASE`/`USE SCHEMA` behave per session while the
-data itself is shared across connections. Full endpoint and statement list:
-[docs/usage.md §11](docs/usage.md#11-what-snowtest-answers).
+data itself is shared across connections.
+
+Once it is running, the server documents itself: `/operations` lists every
+endpoint, statement and function with its gaps, and `/usage` covers
+configuration, the launcher, staged files and troubleshooting. Both are rendered
+from the running build, so they cannot describe a different version.
 
 ## Connecting
 
