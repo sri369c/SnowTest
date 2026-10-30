@@ -64,6 +64,30 @@ export interface SnowtestServer {
 
 const randomToken = (): string => randomUUID().replace(/-/g, '');
 
+const log = (...args: unknown[]): void => console.log(new Date().toISOString(), ...args);
+
+/** Collapse whitespace and cap length so text stays on one log line. */
+function oneLine(text: string, max = 300): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+function logQuery(
+  surface: 'driver' | 'api',
+  session: Session,
+  startedAt: number,
+  sql: string,
+  result: Outcome | SnowflakeError,
+): void {
+  const status =
+    result instanceof SnowflakeError
+      ? `error ${result.code} ${oneLine(result.message, 200)}`
+      : `ok rows=${result.rows.length}${result.rowsAffected ? ` affected=${result.rowsAffected}` : ''}`;
+  log(
+    `query ${surface} session=${session.id} user=${session.user} ${Date.now() - startedAt}ms ${status} sql="${oneLine(sql)}"`,
+  );
+}
+
 interface TokenCheck {
   ok: boolean;
   user?: string;
@@ -240,10 +264,17 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   const app = new Hono();
 
   app.use('*', async (c, next) => {
+    const startedAt = Date.now();
     await next();
     if (config.verbose) {
-      console.log(`${c.req.method} ${new URL(c.req.url).pathname} → ${c.res.status}`);
+      log(`${c.req.method} ${new URL(c.req.url).pathname} → ${c.res.status} ${Date.now() - startedAt}ms`);
     }
+  });
+
+  // Replaces Hono's default handler so uncaught route errors are timestamped.
+  app.onError((error, c) => {
+    log(`error 500 ${c.req.method} ${new URL(c.req.url).pathname}:`, error.stack ?? String(error));
+    return c.text('Internal Server Error', 500);
   });
 
   // ---------------------------------------------------------------------------
@@ -518,8 +549,8 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       const shape = authToken
         ? `len=${authToken.length} dots=${authToken.split('.').length - 1}`
         : 'absent';
-      console.log(
-        `login user=${user} authenticator=${String(data.AUTHENTICATOR ?? '')} token=${shape} ` +
+      log(
+        `login detail user=${user} authenticator=${String(data.AUTHENTICATOR ?? '')} token=${shape} ` +
           `dataKeys=${Object.keys(data).sort().join(',')}`,
       );
     }
@@ -576,15 +607,23 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   };
 
   app.post('/session/v1/login-request', async (c) => {
+    const body = await readJson(c);
+    const nested = body.data;
+    const data = (nested && typeof nested === 'object' ? nested : body) as Record<string, unknown>;
+    const user = String(data.LOGIN_NAME ?? data.loginName ?? 'SNOWTEST_USER');
     try {
-      const body = await readJson(c);
       const session = await establishSession(c, body);
       const token = randomToken();
       const masterToken = randomToken();
       sessions.create(token, session);
+      log(
+        `login ok session=${session.id} user=${session.user} account=${String(data.ACCOUNT_NAME ?? '-')} ` +
+          `authenticator=${String(data.AUTHENTICATOR ?? '-')} ${session.database}.${session.schema} role=${session.role}`,
+      );
       return c.json(loginResponse(session, token, masterToken));
     } catch (error) {
       const failure = mapEngineError(error);
+      log(`login failed user=${user}: ${oneLine(failure.message, 200)}`);
       return c.json(driverErrorResponse(failure));
     }
   });
@@ -598,6 +637,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       const renewed = randomToken();
       sessions.delete(token as string);
       sessions.create(renewed, session);
+      if (config.verbose) log(`token renew session=${session.id} user=${session.user}`);
       return c.json(loginResponse(session, renewed, randomToken()));
     } catch (error) {
       return c.json(driverErrorResponse(mapEngineError(error)));
@@ -612,6 +652,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       const renewed = randomToken();
       sessions.delete(token as string);
       sessions.create(renewed, session);
+      if (config.verbose) log(`token renew session=${session.id} user=${session.user}`);
       return c.json(tokenResponse(session, renewed, randomToken()));
     } catch (error) {
       return c.json(driverErrorResponse(mapEngineError(error)));
@@ -625,6 +666,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     if (token) {
       const session = sessions.delete(token);
       if (session) {
+        log(`logout session=${session.id} user=${session.user}`);
         const connection = session.connection as EngineConnection | null;
         connection?.close();
         session.connection = null;
@@ -635,7 +677,8 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
   app.get('/session', (c) => {
     const token = bearerToken(c.req.header('authorization'));
-    if (token) sessions.delete(token);
+    const session = token ? sessions.delete(token) : undefined;
+    if (session) log(`logout session=${session.id} user=${session.user}`);
     return c.json(successEnvelope(null));
   });
 
@@ -654,9 +697,6 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
     const body = await readJson(c);
     const sql = String(body.sqlText ?? '');
-    if (config.verbose) {
-      console.log(`SQL ${sql.replace(/\s+/g, ' ').trim().slice(0, 400)}`);
-    }
     const describeOnly = body.describeOnly === true;
     const queryId = randomUUID();
 
@@ -665,6 +705,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       const outcome = await router.execute(sql, session, {
         bindings: normalizeBindings(body.bindings),
       });
+      logQuery('driver', session, startedAt, sql, outcome);
 
       // PUT/GET: the client acts on this descriptor directly (it moves the
       // bytes), so the response data *is* the file-transfer payload.
@@ -723,6 +764,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       return c.json(driverQueryResponse(session, outcome, queryId));
     } catch (error) {
       const failure = mapEngineError(error);
+      logQuery('driver', session, startedAt, sql, failure);
       queryLog.set(queryId, {
         sqlText: sql,
         sessionId: session.id,
@@ -863,8 +905,10 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     const queryId = randomUUID();
     const asynchronous = c.req.query('async') === 'true';
 
+    const startedAt = Date.now();
     try {
       const outcome = await router.execute(statement, session, { bindings });
+      logQuery('api', session, startedAt, statement, outcome);
       const response = sqlApiResult(session, outcome, queryId, statementHandle);
       statements.set(statementHandle, {
         outcome,
@@ -889,6 +933,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       return c.json(response);
     } catch (error) {
       const failure = mapEngineError(error);
+      logQuery('api', session, startedAt, statement, failure);
       return c.json(sqlApiErrorBody(failure, statementHandle), errorStatus(failure));
     }
   };
@@ -924,7 +969,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   });
 
   app.all('*', (c) => {
-    if (config.verbose) console.log(`unmatched: ${c.req.method} ${new URL(c.req.url).pathname}`);
+    log(`unmatched ${c.req.method} ${new URL(c.req.url).pathname}`);
     return c.json({ error: 'Not found', path: new URL(c.req.url).pathname }, 404);
   });
 
@@ -957,6 +1002,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
               if (encoding.includes('gzip')) body = gunzipSync(body);
               else if (encoding.includes('deflate')) body = inflateSync(body);
             } catch (error) {
+              log(`error 400 ${req.method} ${req.url}: could not decode '${encoding}' body: ${String(error)}`);
               res.writeHead(400, { 'content-type': 'application/json' });
               res.end(
                 JSON.stringify({ error: `Could not decode '${encoding}' request body: ${String(error)}` }),
@@ -982,6 +1028,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
           res.writeHead(response.status, outHeaders);
           res.end(payload);
         } catch (error) {
+          log(`error 500 ${req.method} ${req.url}:`, error instanceof Error ? (error.stack ?? error.message) : String(error));
           res.writeHead(500, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ error: String(error) }));
         }
