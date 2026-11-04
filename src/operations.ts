@@ -80,9 +80,15 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'GET /queries/v1/query-result/:queryId',
-        behaviour: 'Fetches a stored result for a query id.',
+        behaviour: 'Fetches a stored result for a query id (connector 4.x).',
         status: 'partial',
         note: 'One partition. A real account may return partitions 0…n.',
+      },
+      {
+        syntax: 'GET /queries/:queryId/result',
+        behaviour: 'Fetches a stored result for a query id (connector 5.x).',
+        status: 'partial',
+        note: 'One partition, and only ids this process still holds in memory.',
       },
       {
         syntax: 'POST /queries/v1/abort-request',

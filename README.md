@@ -304,9 +304,10 @@ Being explicit, because a stub that quietly lies is worse than no stub:
   `FIELD_OPTIONALLY_ENCLOSED_BY` and `NULL_IF` are ignored.
 - User stages (`@~`) and table stages (`@%table`) are not implemented.
 - No ODBC.
-- `execute_async` results are kept in process memory and served through
-  `RESULT_SCAN`, which accepts only ids this process ran: a restart forgets
-  them. The SQL API v2 async path (`POST /api/v2/statements?async=true`, then
+- `execute_async` results are kept in process memory and fetched through
+  `RESULT_SCAN` (connector 4.x) or `GET /queries/{id}/result` (connector 5.x),
+  which accept only ids this process ran: a restart forgets them. The SQL API v2
+  async path (`POST /api/v2/statements?async=true`, then
   `GET /api/v2/statements/{handle}`) is tested too.
 - Result paging returns a single partition; `arrow` result format is not
   emitted (JSON only).

@@ -13,10 +13,14 @@ export PYTHONUTF8=1
 PORT="${SNOWTEST_TEST_PORT:-18080}"
 LOG="${SNOWTEST_TEST_LOG:-/tmp/snowtest-compat.log}"
 
+# CI runs this against more than one connector release; the default is whatever
+# pip calls current, which is how wire-format drift gets noticed.
+CONNECTOR="${SNOWTEST_CONNECTOR:-snowflake-connector-python}"
+
 if [ ! -x .venv/bin/python ]; then
-  echo "creating .venv and installing snowflake-connector-python…"
+  echo "creating .venv and installing ${CONNECTOR}…"
   python3 -m venv .venv
-  ./.venv/bin/pip install -q --disable-pip-version-check snowflake-connector-python
+  ./.venv/bin/pip install -q --disable-pip-version-check "$CONNECTOR"
 fi
 
 echo "building…"

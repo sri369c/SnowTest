@@ -832,9 +832,13 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
   });
 
-  app.all('/queries/v1/query-result/:queryId', (c) => {
-    const queryId = c.req.param('queryId');
-    const entry = asyncResults.get(queryId);
+  // Connector 5.x fetches an async result from /queries/{id}/result directly;
+  // 4.x re-runs RESULT_SCAN instead (handled above). Both read the same entry.
+  const storedResult = (queryId: string) => results.get(queryId) ?? asyncResults.get(queryId);
+
+  const serveResult = (c: Context) => {
+    const queryId = c.req.param('queryId') ?? '';
+    const entry = storedResult(queryId);
     if (!entry) {
       return c.json(
         driverErrorResponse(
@@ -844,7 +848,10 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       );
     }
     return c.json(driverQueryResponse(entry.session, entry.outcome, queryId));
-  });
+  };
+
+  app.all('/queries/v1/query-result/:queryId', serveResult);
+  app.all('/queries/:queryId/result', serveResult);
 
   app.get('/monitoring/queries/*', (c) => {
     const segments = new URL(c.req.url).pathname.split('/').filter(Boolean);
