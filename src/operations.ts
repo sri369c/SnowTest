@@ -176,7 +176,7 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'POST /_snowtest/reset',
-        behaviour: 'Drops everything and recreates the configured catalog.',
+        behaviour: 'Drops everything, persisted database files included, and recreates the configured catalog.',
         status: 'supported',
       },
     ],
@@ -215,7 +215,7 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'USE DATABASE | SCHEMA | WAREHOUSE | ROLE',
-        behaviour: 'Switches the session context, including bare `USE`.',
+        behaviour: 'Switches the session context, including bare `USE`; a missing database or schema is an error (`002043`).',
         status: 'supported',
       },
       {
@@ -234,13 +234,22 @@ export const GROUPS: OperationGroup[] = [
     rows: [
       {
         syntax: 'CREATE | DROP DATABASE',
-        behaviour: 'Creates or drops the database and its DuckDB catalog.',
+        behaviour:
+          'Creates or drops the database and its DuckDB catalog, its file when persisted, and its stages. Dropping the current database leaves the session with none (`CURRENT_DATABASE()` is NULL; unqualified names fail with `090105`); a missing database is an error unless `IF EXISTS`.',
+        status: 'supported',
+      },
+      {
+        syntax: 'Persistence (SNOWTEST_DATA_DIR)',
+        behaviour:
+          'Each database is a DuckDB file in the directory; databases, schemas, tables, rows and stage definitions survive a restart. Unset, everything is in memory.',
         status: 'supported',
       },
       {
         syntax: 'CREATE | DROP SCHEMA',
-        behaviour: 'Creates or drops a schema in place.',
-        status: 'supported',
+        behaviour:
+          'Creates or drops a schema in place. `DROP SCHEMA` cascades to its tables, views and stages by default; a missing schema is an error unless `IF EXISTS`.',
+        status: 'partial',
+        note: '`RESTRICT` refuses any schema that still holds tables or views (`002003`, SQLSTATE `2BP01`); Snowflake refuses only on foreign-key references.',
       },
       {
         syntax: 'CREATE | DROP WAREHOUSE',
@@ -275,7 +284,7 @@ export const GROUPS: OperationGroup[] = [
         syntax: 'ALTER DATABASE | SCHEMA | WAREHOUSE | ROLE',
         behaviour: 'Accepted.',
         status: 'partial',
-        note: 'No-ops: there is no sizing, retention or ownership to change.',
+        note: 'No-ops: there is no sizing, retention or ownership to change. `ALTER SCHEMA … RENAME TO` is not supported.',
       },
       {
         syntax: 'COMMENT ON …',
@@ -294,7 +303,7 @@ export const GROUPS: OperationGroup[] = [
     rows: [
       {
         syntax: 'SHOW [TERSE] DATABASES | SCHEMAS | TABLES | VIEWS | COLUMNS | OBJECTS | FUNCTIONS | WAREHOUSES | ROLES | STAGES | PARAMETERS | GRANTS | USERS',
-        behaviour: 'Answers from the catalog, honouring `IN …`, `LIKE …` and `LIMIT`.',
+        behaviour: 'Answers from the catalog, honouring `IN …`, `LIKE …` and `LIMIT`. `SHOW STAGES` lists the current schema by default, every schema with `IN DATABASE [db]`, everything with `IN ACCOUNT`.',
         status: 'supported',
       },
       {
@@ -317,7 +326,7 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'DESCRIBE TABLE | VIEW',
-        behaviour: 'Name, type, kind, nullability, default, key flags and comment.',
+        behaviour: 'Name, type, kind, nullability, default, key flags and comment. The table name matches exactly: `"orders"` is not `ORDERS`.',
         status: 'supported',
       },
       {
@@ -357,6 +366,32 @@ export const GROUPS: OperationGroup[] = [
         status: 'supported',
       },
       {
+        syntax: 'CREATE [OR REPLACE] TABLE t (col type [NOT NULL] …) AS SELECT',
+        behaviour:
+          'Runs the query first, then creates the typed table and inserts by position, in one transaction: `CREATE OR REPLACE TABLE t (…) AS SELECT … FROM t` reads the old rows, and a NULL in a NOT NULL column fails the statement (`100072`) and keeps any table it was replacing.',
+        status: 'partial',
+        note: 'PRIMARY KEY, UNIQUE and FOREIGN KEY are dropped, as Snowflake does not enforce them; `DESCRIBE` reports them as N.',
+      },
+      {
+        syntax: 'ALTER TABLE … RENAME TO [db.][schema.]name',
+        behaviour:
+          'Renames in place within a schema. Across schemas, columns (type, NOT NULL) and rows are copied and the source dropped, in one transaction. Across databases (DuckDB writes one database per transaction), the copy is committed and its row count verified, then the source is dropped.',
+        status: 'partial',
+        note: 'A moved table does not carry column defaults or comments. A cross-database rename is not atomic: if the source cannot be dropped, the copy is removed and the error reported.',
+      },
+      {
+        syntax: 'ALTER TABLE … SWAP WITH …',
+        behaviour: 'Exchanges the two tables in one transaction, across schemas of one database too.',
+        status: 'partial',
+        note: 'Across databases it is refused with an error: three cross-database moves cannot be made atomic.',
+      },
+      {
+        syntax: 'ALTER TABLE … CLUSTER BY (…) | DROP CLUSTERING KEY | SUSPEND RECLUSTER | RESUME RECLUSTER',
+        behaviour: 'Accepted once the table is found to exist; a missing table is object-not-found.',
+        status: 'partial',
+        note: 'No-ops: there is no clustering to change.',
+      },
+      {
         syntax: 'CREATE | DROP VIEW',
         behaviour: 'Ordinary views over the same catalog.',
         status: 'supported',
@@ -369,7 +404,7 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'CLUSTER BY, COPY GRANTS, DATA_RETENTION_TIME_IN_DAYS, CHANGE_TRACKING, ENABLE_SCHEMA_EVOLUTION',
-        behaviour: 'Parsed and dropped.',
+        behaviour: 'Parsed and dropped from `CREATE`.',
         status: 'partial',
         note: 'Accepted so ordinary DDL runs; none of it has an effect.',
       },
@@ -389,7 +424,7 @@ export const GROUPS: OperationGroup[] = [
     rows: [
       {
         syntax: 'IFF, DECODE, EQUAL_NULL',
-        behaviour: '`CASE WHEN`, `CASE`, `IS NOT DISTINCT FROM`.',
+        behaviour: '`CASE WHEN`, `CASE` with `IS NOT DISTINCT FROM` (so NULL matches NULL), `IS NOT DISTINCT FROM`.',
         status: 'supported',
       },
       {
@@ -399,19 +434,30 @@ export const GROUPS: OperationGroup[] = [
       },
       { syntax: 'SQUARE', behaviour: '`x * x`.', status: 'supported' },
       {
-        syntax: 'LISTAGG, BOOLOR_AGG, BOOLAND_AGG',
-        behaviour: '`string_agg`, `bool_or`, `bool_and`; `WITHIN GROUP` is stripped.',
+        syntax: 'LISTAGG, ARRAY_AGG, BOOLOR_AGG, BOOLAND_AGG',
+        behaviour:
+          '`string_agg`, `array_agg`, `bool_or`, `bool_and`; `WITHIN GROUP (ORDER BY …)` moves inside the call, so the order is kept. `ARRAY_AGG` skips NULLs and returns `[]` for no rows, as in Snowflake.',
         status: 'supported',
       },
       {
-        syntax: 'GETDATE, SYSDATE, DATEADD, DATEDIFF, CONVERT_TIMEZONE',
-        behaviour: '`now()`, interval arithmetic, `date_diff`, `timezone()`.',
+        syntax: 'CURRENT_TIMESTAMP, LOCALTIMESTAMP, CURRENT_TIME, LOCALTIME, CURRENT_DATE, SYSDATE, GETDATE — bare or with ()',
+        behaviour:
+          'DuckDB clock functions; `SYSDATE()` is the UTC wall clock as TIMESTAMP_NTZ. A precision of 0, 3 or 6–9 truncates accordingly.',
+        status: 'partial',
+        note: 'Precisions 1, 2, 4 and 5 are refused with an error.',
+      },
+      {
+        syntax: 'DATEADD, DATEDIFF, CONVERT_TIMEZONE',
+        behaviour: 'Interval arithmetic, `date_diff`, `timezone()`.',
         status: 'supported',
       },
       {
-        syntax: 'TO_VARCHAR | CHAR | TEXT, TO_BOOLEAN, TO_DATE, TO_TIMESTAMP*, TO_BINARY, TO_NUMBER | DECIMAL | NUMERIC',
-        behaviour: 'Casts, with `TRY_` variants returning `NULL` instead of failing.',
-        status: 'supported',
+        syntax:
+          'TO_VARCHAR | CHAR | TEXT, TO_DATE, TO_TIMESTAMP[_NTZ | _LTZ | _TZ], TO_BOOLEAN, TO_NUMBER | DECIMAL | NUMERIC, TO_DOUBLE, TO_BINARY, and their TRY_ variants',
+        behaviour:
+          'Casts; `TRY_` variants use `TRY_CAST` and return NULL on bad input. Date/time formats are translated (YYYY, YY, MM, MON, MMMM, DD, DY, HH24, HH12, AM, PM, MI, SS, FF3, FF6, FF9, FF (= FF9), TZH:TZM, "quoted text"); `TO_TIMESTAMP(n, scale)` reads an epoch value; `TO_BINARY` reads HEX, BASE64 and UTF-8.',
+        status: 'partial',
+        note: 'Any other format element (HH, FF1, …), and any number format model, is refused with an error naming it rather than ignored.',
       },
       {
         syntax: 'ARRAY_CONSTRUCT, OBJECT_CONSTRUCT, PARSE_JSON, TO_JSON',
@@ -424,18 +470,27 @@ export const GROUPS: OperationGroup[] = [
         status: 'supported',
       },
       {
-        syntax: 'Types: NUMBER, VARIANT, STRING, BINARY, TIMESTAMP_NTZ',
-        behaviour: '`DECIMAL`, `JSON`, `VARCHAR`, `BLOB`, `TIMESTAMP`.',
+        syntax: 'Types: NUMBER, DECIMAL, NUMERIC, VARIANT, OBJECT, ARRAY, STRING, TEXT, BINARY, FLOAT, TIME, TIMESTAMP_NTZ | LTZ | TZ',
+        behaviour:
+          '`DECIMAL` — (38,0) when no precision is given, as in Snowflake, so `\'1.5\'::number` is 2 — then `JSON`, `VARCHAR`, `BLOB`, `DOUBLE`, `TIMESTAMP[TZ]`. Mapped only where a type is named (`::`, `CAST(… AS …)`, column definitions in `CREATE TABLE` and `ALTER TABLE … ADD | … TYPE`), so a column called `number` or `variant` stays a column. A cast to `TIME` accepts TIMESTAMP_TZ/LTZ (UTC wall clock; the engine runs in UTC) and refuses 24:00:00 (`TRY_CAST` gives NULL).',
         status: 'supported',
+        note: '`TIME(n)` casts truncate to n digits; timestamp casts take n of 0, 3 (truncated) or 6–9. Columns need n of 6–9 (DuckDB stores TIME/TZ in microseconds and rounds `TIMESTAMP(0|3)`); lower is an error. `TIMESTAMP_NTZ(9)` is nanoseconds, `(7)`/`(8)` an error. `DESCRIBE` reports `(9)`. `CREATE TABLE … AS SELECT x::timestamp_ntz(0)` columns are full precision: later fractional INSERT/MERGE values are kept, not truncated. `CREATE TABLE` TIME columns refuse 24:00:00 on insert; columns added by `ALTER TABLE … ADD` fail only when such a value is read.',
       },
       {
         syntax: 'CURRENT_DATABASE, CURRENT_SCHEMA, CURRENT_ROLE, CURRENT_USER, CURRENT_WAREHOUSE, CURRENT_ACCOUNT, CURRENT_VERSION',
-        behaviour: 'Substituted from the connection’s session state.',
+        behaviour: 'Substituted from the connection’s session state; NULL when there is no current database or schema.',
         status: 'supported',
       },
       {
+        syntax: "String literals: '…\\'…', '\\\\', '\\n', '\\t', '\\xhh', '\\uhhhh', '\\ooo'",
+        behaviour: 'Backslash escapes are applied as in Snowflake before DuckDB sees the value.',
+        status: 'partial',
+        note: 'A NUL character (`\\0`) is refused with an error.',
+      },
+      {
         syntax: 'Unquoted identifiers',
-        behaviour: 'Folded to upper case, as Snowflake folds them.',
+        behaviour:
+          'Folded to upper case everywhere, so table, column and alias names come back as Snowflake reports them (`select a` → `A`); quoted names keep their case and are never rewritten.',
         status: 'supported',
       },
     ],
@@ -504,7 +559,8 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
   },
   {
     feature: 'Multiple statements per request',
-    outcome: 'One statement per request; `MULTI_STATEMENT_COUNT` is ignored.',
+    outcome:
+      'Not split: DuckDB runs every statement but only one result comes back, chosen by DuckDB rather than by Snowflake’s rules; routing (`SHOW`, `USE`, `DESCRIBE`, account DDL, `ALTER TABLE`) is decided by the first statement alone. `MULTI_STATEMENT_COUNT` is ignored. dbt and the connector’s `execute_string` split client-side.',
   },
   {
     feature: 'Driver async execution (`execute_async`)',
@@ -523,8 +579,16 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
     outcome: 'Not routed; POST the statement instead.',
   },
   {
-    feature: 'Persistence',
-    outcome: 'Data lives in memory and a temp stage directory: a restart is a clean slate.',
+    feature: 'ALTER SCHEMA … RENAME TO',
+    outcome: 'Fails with `not supported on snowtest`.',
+  },
+  {
+    feature: 'ALTER SCHEMA … SWAP WITH',
+    outcome: 'Fails with `not supported on snowtest`.',
+  },
+  {
+    feature: "Bracket variant paths cast to string (`col['a']::string`)",
+    outcome: 'Fails with `not supported on snowtest`; write `col:a::string`.',
   },
 ];
 

@@ -83,6 +83,15 @@ export const OPTIONS: OptionSpec[] = [
     type: 'string',
   },
   {
+    flag: '--data-dir',
+    argument: '<dir>',
+    env: 'SNOWTEST_DATA_DIR',
+    default: 'unset — in memory',
+    description: 'Persist each database as a DuckDB file here (plus stage definitions); reloaded at startup',
+    configKey: 'dataDir',
+    type: 'string',
+  },
+  {
     flag: '--verbose',
     env: 'SNOWTEST_VERBOSE',
     default: 'off',

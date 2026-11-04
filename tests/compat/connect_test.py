@@ -165,6 +165,19 @@ def main() -> int:
         assert row[0].year == 2024 and row[0].month == 1 and row[0].day == 15, row[0]
         assert row[1] == datetime.date(2024, 1, 15), row[1]
 
+    @check("TIME values (clock functions, casts, column round-trip)")
+    def _():
+        for sql in ("SELECT CURRENT_TIME()", "SELECT CURRENT_TIME", "SELECT LOCALTIME()", "SELECT CURRENT_TIMESTAMP()::TIME"):
+            value = q(cur, sql)[0][0]
+            assert isinstance(value, datetime.time), (sql, value)
+        assert q(cur, "SELECT '14:05:06'::TIME")[0][0] == datetime.time(14, 5, 6)
+        assert q(cur, "SELECT '2024-01-02 03:04:05.5'::TIMESTAMP_TZ::TIME")[0][0] == datetime.time(3, 4, 5, 500000)
+        q(cur, "CREATE OR REPLACE TABLE compat_times (t TIME)")
+        cur.execute("INSERT INTO compat_times VALUES (%s), ('23:59:59.999999')", (datetime.time(14, 5, 6, 123456),))
+        rows = q(cur, "SELECT t FROM compat_times ORDER BY t")
+        assert rows == [(datetime.time(14, 5, 6, 123456),), (datetime.time(23, 59, 59, 999999),)], rows
+        q(cur, "DROP TABLE compat_times")
+
     @check("aggregate + filter")
     def _():
         total, count = q(
@@ -194,13 +207,13 @@ def main() -> int:
         rows = cur.fetchall()
         names = [row[0] for row in rows]
         assert names == [
-            "id",
-            "customer",
-            "amount",
-            "is_paid",
-            "created_at",
-            "order_date",
-            "payload",
+            "ID",
+            "CUSTOMER",
+            "AMOUNT",
+            "IS_PAID",
+            "CREATED_AT",
+            "ORDER_DATE",
+            "PAYLOAD",
         ], names
 
     @check("SHOW TABLES")
@@ -262,7 +275,14 @@ def main() -> int:
         status, body = sql_api("SELECT 40 + 2 AS answer")
         assert status == 200, status
         assert body["data"] == [["42"]], body
-        assert body["resultSetMetaData"]["rowType"][0]["name"] == "answer", body
+        assert body["resultSetMetaData"]["rowType"][0]["name"] == "ANSWER", body
+
+    @check("SQL API v2 TIME as seconds since midnight")
+    def _():
+        status, body = sql_api("SELECT '14:05:06.5'::TIME AS t")
+        assert status == 200, status
+        assert body["data"] == [["50706.500000000"]], body
+        assert body["resultSetMetaData"]["rowType"][0]["type"] == "time", body
 
     @check("SQL API v2 async submit + poll")
     def _():
@@ -291,10 +311,9 @@ def main() -> int:
 
     @check("cursor.description")
     def _():
-        cur.execute("SELECT 1 AS a, 'x' AS b")
+        cur.execute('SELECT 1 AS a, \'x\' AS "b"')
         desc = [(d[0], d[1]) for d in cur.description]
-        assert desc[0][0].lower() == "a", desc
-        assert len(desc) == 2, desc
+        assert [d[0] for d in desc] == ["A", "b"], desc
 
     @check("database isolation")
     def _():

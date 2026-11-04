@@ -47,11 +47,11 @@ image defaults to port 8080 unless `SNOWTEST_PORT` is set.
 By hand, if you would rather see every flag:
 
 ```bash
-podman build -t snowtest:1.0.0 .
+podman build -t snowtest:2.0.0 .
 podman network create snowtest-network   # once
 podman run -d --name snowtest --network snowtest-network \
   -p 3030:3030 -e SNOWTEST_PORT=3030 \
-  --userns=keep-id:uid=1000,gid=1000 snowtest:1.0.0
+  --userns=keep-id:uid=1000,gid=1000 snowtest:2.0.0
 ```
 
 `docker build` / `docker run` are the same apart from `--userns`. Compose works
@@ -159,7 +159,7 @@ real assertion instead of a rubber stamp. `tests/dbt/verify.py` checks both.
 
 ### dbt
 
-Verified end to end against **dbt-core 1.12 + dbt-snowflake 1.12** with key-pair
+Verified end to end against **dbt 1.12** with key-pair
 auth: `dbt debug`, `dbt run` (view, table and incremental models — including the
 second run's `merge`), `dbt test`, and re-querying the results all pass. The
 project lives in `tests/dbt/`; `npm run test:dbt` runs the whole flow.
@@ -185,8 +185,8 @@ snowtest:
       protocol: http
 ```
 
-`host`, `port`, `protocol` and `private_key_path` are ordinary dbt-snowflake
-profile keys, so nothing in your project changes. Any schema works (dbt creates
+`host`, `port`, `protocol` and `private_key_path` are ordinary dbt profile keys,
+so nothing in your project changes. Any schema works (dbt creates
 it); the bundled `tests/dbt/profiles.yml` uses `DBT_TEST` on port 18081.
 
 What dbt exercises on every run, and what snowtest answers: `SHOW TERSE
@@ -318,7 +318,7 @@ Being explicit, because a stub that quietly lies is worse than no stub:
 npm run typecheck     # tsc --noEmit
 npm test              # vitest: dialect translation
 npm run test:py       # boots the server, runs the real Python connector suite
-npm run test:dbt      # dbt-snowflake over key-pair: debug, run, run, seed, test, stages
+npm run test:dbt      # dbt over key-pair: debug, run, run, seed, test, stages
 ```
 
 `npm run test:py` is the important one: it starts the server, connects with the

@@ -26,6 +26,7 @@ const config: SnowtestConfig = {
   warehouses: ['SNOWTEST_WH'],
   roles: ['SYSADMIN'],
   verbose: false,
+  dataDir: null,
 };
 
 describe('cell formatting', () => {

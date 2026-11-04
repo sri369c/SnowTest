@@ -13,6 +13,8 @@
  * JSON numbers mostly works but loses 38-digit precision, so we stringify.
  */
 
+import { SnowflakeError } from './errors.js';
+
 export interface SnowflakeColumn {
   name: string;
   /** Snowflake logical type, e.g. `fixed`, `text`, `timestamp_ntz`. */
@@ -174,8 +176,21 @@ export function formatDate(value: Date): string {
   return `${value.getUTCFullYear()}-${pad(value.getUTCMonth() + 1)}-${pad(value.getUTCDate())}`;
 }
 
-export function formatTime(value: Date): string {
-  return `${pad(value.getUTCHours())}:${pad(value.getUTCMinutes())}:${pad(value.getUTCSeconds())}`;
+const MICROS_PER_DAY = 86_400_000_000n;
+
+/**
+ * Seconds since midnight with 9 fractional digits (scale 9), e.g. `50706.123456000`:
+ * the TIME form of both the driver JSON result and the SQL API v2.
+ * DuckDB gives TIME as bigint µs and TIMETZ as `{micros, offset}` (wall clock).
+ */
+export function timeSecondsString(value: unknown): string {
+  const micros = typeof value === 'bigint' ? value : (value as { micros?: unknown }).micros;
+  if (typeof micros !== 'bigint') throw new Error(`Unexpected TIME value from the engine: ${String(value)}`);
+  // DuckDB allows 24:00:00; Snowflake TIME stops at 23:59:59.999999999.
+  if (micros < 0n || micros >= MICROS_PER_DAY) {
+    throw new SnowflakeError('100038', `Time value of ${micros} microseconds is out of range [00:00:00, 24:00:00).`, '22018', 'runtime');
+  }
+  return `${micros / 1_000_000n}.${String(micros % 1_000_000n).padStart(6, '0')}000`;
 }
 
 /** Render a JS value the way Snowflake would put it on the wire. */
@@ -203,10 +218,8 @@ export function encodeValue(value: unknown, column: SnowflakeColumn): unknown {
       if (value instanceof Date) return formatDate(value);
       return String(value);
     }
-    case 'time': {
-      if (value instanceof Date) return formatTime(value);
-      return String(value);
-    }
+    case 'time':
+      return timeSecondsString(value);
     case 'timestamp_ntz':
     case 'timestamp_ltz':
     case 'timestamp_tz': {
@@ -246,18 +259,6 @@ function epochDaysString(value: Date): string {
   return String(Math.floor(value.getTime() / 86_400_000));
 }
 
-/** Fractional seconds since midnight, the JSON protocol's time form. */
-function timeSecondsString(value: Date): string {
-  const milliseconds =
-    value.getUTCHours() * 3_600_000 +
-    value.getUTCMinutes() * 60_000 +
-    value.getUTCSeconds() * 1000 +
-    value.getUTCMilliseconds();
-  const seconds = Math.floor(milliseconds / 1000);
-  const nanos = (milliseconds % 1000) * 1_000_000;
-  return `${seconds}.${String(nanos).padStart(9, '0')}`;
-}
-
 function driverValue(value: unknown, column: SnowflakeColumn | undefined): unknown {
   if (value === null || value === undefined) return null;
   const type = column?.type ?? 'text';
@@ -276,7 +277,7 @@ function driverValue(value: unknown, column: SnowflakeColumn | undefined): unkno
     case 'date':
       return value instanceof Date ? epochDaysString(value) : String(value);
     case 'time':
-      return value instanceof Date ? timeSecondsString(value) : String(value);
+      return timeSecondsString(value);
     case 'timestamp_ntz':
       // NTZ is a bare fractional epoch; a formatted string is rejected.
       return value instanceof Date ? epochSecondsString(value) : String(value);
@@ -314,7 +315,7 @@ export function toDriverRowset(rows: unknown[][], columns: SnowflakeColumn[]): u
   return rows.map((row) => row.map((value, index) => driverValue(value, columns[index])));
 }
 
-/** The SQL REST API v2 returns human-readable formatted values instead. */
+/** The SQL REST API v2 returns human-readable formatted values instead; TIME keeps the spec's seconds form. */
 export function toApiV2Rowset(rows: unknown[][], columns: SnowflakeColumn[]): unknown[][] {
   return rows.map((row) => row.map((value, index) => encodeValue(value, columns[index])));
 }

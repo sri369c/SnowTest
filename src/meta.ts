@@ -11,12 +11,21 @@
  * forward everything else to the engine.
  */
 
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import { Catalog, normalizeName } from './catalog.js';
-import { rewrite } from './dialect.js';
-import { Engine, type EngineConnection } from './engine.js';
-import { SnowflakeError, compilationError, objectNotFound } from './errors.js';
+import { rewrite, splitColumnListCtas, toSqlLiteral, type ColumnListCtas } from './dialect.js';
+import { Engine, quoteIdent, type EngineConnection, type QueryResult } from './engine.js';
+import {
+  SnowflakeError,
+  compilationError,
+  mapEngineError,
+  noCurrentContext,
+  objectNotFound,
+  unsupported,
+} from './errors.js';
+import type { DataDir } from './persist.js';
 import type { Session } from './session.js';
 import { StageStore } from './stage.js';
 import { toSnowflakeType, toSnowflakeTypeName, type SnowflakeColumn } from './types.js';
@@ -118,6 +127,12 @@ function stripComments(sql: string): string {
     const ch = sql[i];
     if (quote) {
       out += ch;
+      // Snowflake string literals take backslash escapes (`'it\'s'`).
+      if (quote === "'" && ch === '\\' && i + 1 < sql.length) {
+        out += sql[i + 1];
+        i += 2;
+        continue;
+      }
       if (ch === quote) quote = null;
       i += 1;
       continue;
@@ -173,32 +188,118 @@ interface ResolvedTable {
   name: string;
 }
 
+const qualifiedTable = (table: ResolvedTable): string =>
+  `${quoteIdent(table.database)}.${quoteIdent(table.schema)}.${quoteIdent(table.name)}`;
+
+const displayName = (table: ResolvedTable): string => `${table.database}.${table.schema}.${table.name}`;
+
+/** One table name: up to three dot-separated parts, each bare or double-quoted. */
+const TABLE_NAME = String.raw`((?:"[^"]*"|[\w$]+)(?:\s*\.\s*(?:"[^"]*"|[\w$]+)){0,2})`;
+
+const ALTER_TABLE = new RegExp(
+  String.raw`^alter\s+table\s+(if\s+exists\s+)?${TABLE_NAME}\s+` +
+    String.raw`(cluster\s+by\s*\([\s\S]*\)|drop\s+clustering\s+key|suspend\s+recluster|resume\s+recluster|` +
+    String.raw`rename\s+to\s+${TABLE_NAME}|swap\s+with\s+${TABLE_NAME})\s*$`,
+  'i',
+);
+
+/** The one object a write/drop names: verb, modifiers, kind and `IF [NOT] EXISTS` skipped. */
+const WRITE_TARGET = new RegExp(
+  String.raw`^(?:create\s+(?:or\s+replace\s+)?(?:(?:local|global|temp|temporary|transient|volatile|secure|recursive|materialized)\s+)*` +
+    String.raw`(?:table|view|sequence)|(?:drop|alter)\s+(?:table|view|sequence)|insert\s+into|merge\s+into|update|delete\s+from)` +
+    String.raw`\s+(?:if\s+(?:not\s+)?exists\s+)?${TABLE_NAME}`,
+  'i',
+);
+
+const operationOf = (statement: string): string => /^\w+/.exec(statement)?.[0].toUpperCase() ?? 'operation';
+
+/** DuckDB's "X does not exist" for an unqualified X, in a session without context, is Snowflake's 090105/090106. */
+function missingContext(error: unknown, statement: string, session: Session): SnowflakeError | null {
+  if (session.database !== null && session.schema !== null) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  const name = /(?:Table|View|Sequence) with name (.+?) does not exist/.exec(message)?.[1];
+  if (!name) return null;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const unqualified = new RegExp(String.raw`(?<![\w$".]|\.\s+)(?:"${escaped}"|${escaped})(?![\w$"]|\s*\.)`, 'i');
+  if (!unqualified.test(statement)) return null;
+  return noCurrentContext(session.database === null ? 'database' : 'schema', operationOf(statement));
+}
+
+/** Run `cleanup` after `error`, then rethrow `error`; a cleanup failure is appended, never substituted. */
+export async function failAfter(error: unknown, cleanup: () => Promise<unknown>): Promise<never> {
+  try {
+    await cleanup();
+  } catch (cleanupError) {
+    const original = mapEngineError(error);
+    const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+    throw new SnowflakeError(
+      original.code,
+      `${original.message}\n(cleanup also failed: ${detail})`,
+      original.sqlState,
+      original.kind,
+    );
+  }
+  throw error;
+}
+
+function currentDatabase(session: Session, operation = 'operation'): string {
+  if (session.database === null) throw noCurrentContext('database', operation);
+  return session.database;
+}
+
+function currentSchema(session: Session, operation = 'operation'): string {
+  if (session.schema === null) throw noCurrentContext('schema', operation);
+  return session.schema;
+}
+
 function resolveTable(session: Session, reference: string): ResolvedTable {
   const parts = splitName(reference);
   if (parts.length >= 3) {
     return { database: parts[0], schema: parts[1], name: parts.slice(2).join('.') };
   }
   if (parts.length === 2) {
-    return { database: session.database, schema: parts[0], name: parts[1] };
+    return { database: currentDatabase(session), schema: parts[0], name: parts[1] };
   }
   if (parts.length === 1) {
-    return { database: session.database, schema: session.schema, name: parts[0] };
+    return { database: currentDatabase(session), schema: currentSchema(session), name: parts[0] };
   }
   throw compilationError(`Invalid object name '${reference}'.`);
 }
 
+/** `x` or `db.x` naming a database, else the current one. */
+function resolveDatabase(session: Session, reference: string | undefined): string {
+  const parts = reference ? splitName(reference) : [];
+  return parts.length > 0 ? parts[0] : currentDatabase(session);
+}
+
 function resolveSchema(session: Session, reference: string | undefined): { database: string; schema: string } {
-  if (!reference) return { database: session.database, schema: session.schema };
+  if (!reference) return { database: currentDatabase(session), schema: currentSchema(session) };
   const parts = splitName(reference);
   if (parts.length >= 2) return { database: parts[0], schema: parts[1] };
   if (parts.length === 1) {
     // `SHOW TABLES IN <db>` is valid, so a single part means database.
     if (session.catalog.getDatabase(parts[0])) {
-      return { database: parts[0], schema: session.schema };
+      return { database: parts[0], schema: currentSchema(session) };
     }
-    return { database: session.database, schema: parts[0] };
+    return { database: currentDatabase(session), schema: parts[0] };
   }
-  return { database: session.database, schema: session.schema };
+  return { database: currentDatabase(session), schema: currentSchema(session) };
+}
+
+/** SHOW STAGES scope like SHOW TABLES (current schema by default); `IN DATABASE` spans its schemas, `IN ACCOUNT` → null. */
+function stageScope(session: Session, rest: string): { database: string; schema: string | null } | null {
+  const match = /\bin\s+(?:(account|database|schema)\b\s*)?([\w$".]*)/i.exec(rest);
+  const keyword = match?.[1]?.toUpperCase();
+  const name = match?.[2] || undefined;
+  if (keyword === 'ACCOUNT') return null;
+  if (keyword === 'DATABASE') {
+    const database = resolveDatabase(session, name);
+    if (!session.catalog.getDatabase(database)) throw objectNotFound('DATABASE', database);
+    return { database, schema: null };
+  }
+  const { database, schema } = resolveSchema(session, name);
+  if (!session.catalog.getSchema(database, schema)) throw objectNotFound('SCHEMA', `${database}.${schema}`);
+  return { database, schema };
 }
 
 function likeMatcher(pattern: string | null): (value: string) => boolean {
@@ -223,6 +324,7 @@ export class StatementRouter {
     private readonly engine: Engine,
     private readonly catalog: Catalog,
     readonly stages: StageStore = new StageStore(),
+    private readonly dataDir: DataDir | null = null,
   ) {}
 
   private async connectionFor(session: Session): Promise<EngineConnection> {
@@ -270,6 +372,14 @@ export class StatementRouter {
     if (verb === 'REMOVE' || verb === 'RM') return this.handleRemove(statement, session);
     if (verb === 'SHOW') return this.handleShow(statement, session);
     if (verb === 'DESCRIBE' || verb === 'DESC') return this.handleDescribe(statement, session);
+    if (verb === 'CREATE') {
+      const ctas = splitColumnListCtas(statement);
+      if (ctas) return this.handleColumnListCtas(ctas, session, options);
+    }
+    if (verb === 'ALTER' && /^alter\s+table\b/i.test(statement)) {
+      const handled = await this.handleAlterTable(statement, session);
+      if (handled) return handled;
+    }
     if (verb === 'CREATE' || verb === 'DROP' || verb === 'ALTER' || verb === 'COMMENT') {
       const handled = await this.handleAccountDdl(statement, session);
       if (handled) return handled;
@@ -297,6 +407,166 @@ export class StatementRouter {
     return this.runOnEngine(insert, session, options);
   }
 
+  /** Forget a dropped database's (or schema's) stages: definitions, directories, `stages.json`. */
+  private async removeStages(database: string, schema?: string): Promise<void> {
+    this.catalog.dropStagesIn(database, schema);
+    await this.stages.removeScope(database, schema);
+    await this.dataDir?.saveStages(this.catalog.stages.values());
+  }
+
+  /** Run `work` in one DuckDB transaction on the session's connection. */
+  private async inTransaction<T>(connection: EngineConnection, work: () => Promise<T>): Promise<T> {
+    await connection.execute('BEGIN TRANSACTION');
+    try {
+      const result = await work();
+      await connection.execute('COMMIT');
+      return result;
+    } catch (error) {
+      return failAfter(error, () => connection.execute('ROLLBACK'));
+    }
+  }
+
+  /** Typed create, then insert by position, atomically: a NOT NULL violation keeps any replaced table. */
+  private async handleColumnListCtas(
+    ctas: ColumnListCtas,
+    session: Session,
+    options: ExecuteOptions,
+  ): Promise<Outcome> {
+    const target = resolveTable(session, ctas.table);
+    if (ctas.ifNotExists && (await this.engine.objectKind(target.database, target.schema, target.name))) {
+      return statusOutcome(`${target.name} already exists, statement succeeded.`, STATEMENT_TYPES.create);
+    }
+    const connection = await this.connectionFor(session);
+    const name = quoteIdent(`SNOWTEST_CTAS_${randomUUID().replace(/-/g, '').toUpperCase()}`);
+    const staging = `"temp"."main".${name}`;
+    await this.inTransaction(connection, async () => {
+      // Snowflake runs the query before replacing the table: a self-reference reads the old rows.
+      // Internal staging, not a user target: bypasses runOnEngine's context guard.
+      await this.executeTranslated(
+        connection,
+        `CREATE TEMP TABLE ${name} AS SELECT * FROM (${ctas.query})`,
+        session,
+        options,
+      );
+      await this.runOnEngine(ctas.create, session, {});
+      await this.runOnEngine(`INSERT INTO ${ctas.table} SELECT * FROM ${staging}`, session, {});
+      await connection.execute(`DROP TABLE ${staging}`);
+    });
+    return statusOutcome(`Table ${target.name} successfully created.`, STATEMENT_TYPES.create);
+  }
+
+  // ---------------------------------------------------------------------------
+  // ALTER TABLE: clustering, RENAME TO, SWAP WITH
+  // ---------------------------------------------------------------------------
+
+  private async requireTable(table: ResolvedTable): Promise<void> {
+    if ((await this.engine.objectKind(table.database, table.schema, table.name)) !== 'TABLE') {
+      throw objectNotFound('TABLE', displayName(table));
+    }
+  }
+
+  /** Column DDL as seen inside the session's transaction (the admin connection cannot see it). */
+  private async columnDefinitions(connection: EngineConnection, table: ResolvedTable): Promise<string> {
+    const result = await connection.execute(
+      `SELECT column_name, data_type, is_nullable FROM duckdb_columns()
+       WHERE database_name = ${toSqlLiteral(table.database)} AND schema_name = ${toSqlLiteral(table.schema)}
+         AND table_name = ${toSqlLiteral(table.name)}
+       ORDER BY column_index`,
+    );
+    return result.rows
+      .map(([name, type, nullable]) => `${quoteIdent(String(name))} ${String(type)}${nullable ? '' : ' NOT NULL'}`)
+      .join(', ');
+  }
+
+  /** DuckDB renames only within a schema; across schemas, copy columns and rows, then drop. Same database only. */
+  private async moveTable(connection: EngineConnection, from: ResolvedTable, to: ResolvedTable): Promise<void> {
+    if (from.database === to.database && from.schema === to.schema) {
+      await connection.execute(`ALTER TABLE ${qualifiedTable(from)} RENAME TO ${quoteIdent(to.name)}`);
+      return;
+    }
+    const definition = await this.columnDefinitions(connection, from);
+    await connection.execute(`CREATE TABLE ${qualifiedTable(to)} (${definition})`);
+    await connection.execute(`INSERT INTO ${qualifiedTable(to)} SELECT * FROM ${qualifiedTable(from)}`);
+    await connection.execute(`DROP TABLE ${qualifiedTable(from)}`);
+  }
+
+  /** A DuckDB transaction writes one database: commit a verified copy, then drop the source (or the copy, on failure). */
+  private async moveAcrossDatabases(connection: EngineConnection, from: ResolvedTable, to: ResolvedTable): Promise<void> {
+    const definition = await this.columnDefinitions(connection, from);
+    await this.inTransaction(connection, async () => {
+      await connection.execute(`CREATE TABLE ${qualifiedTable(to)} (${definition})`);
+      await connection.execute(`INSERT INTO ${qualifiedTable(to)} SELECT * FROM ${qualifiedTable(from)}`);
+      const check = await connection.execute(
+        `SELECT (SELECT count(*) FROM ${qualifiedTable(to)}) = (SELECT count(*) FROM ${qualifiedTable(from)})`,
+      );
+      if (check.rows[0]?.[0] !== true) {
+        throw new SnowflakeError(
+          '000000',
+          `Copy of ${displayName(from)} to ${displayName(to)} is incomplete; nothing was moved.`,
+          '22000',
+          'runtime',
+        );
+      }
+    });
+    try {
+      await connection.execute(`DROP TABLE ${qualifiedTable(from)}`);
+    } catch (error) {
+      await failAfter(error, () => connection.execute(`DROP TABLE ${qualifiedTable(to)}`));
+    }
+  }
+
+  private async handleAlterTable(statement: string, session: Session): Promise<Outcome | null> {
+    const match = ALTER_TABLE.exec(statement);
+    if (!match) return null;
+
+    const table = resolveTable(session, match[2]);
+    const action = match[3].toLowerCase();
+    const done = statusOutcome('Statement executed successfully.', STATEMENT_TYPES.alter);
+
+    if (match[1] && (await this.engine.objectKind(table.database, table.schema, table.name)) !== 'TABLE') {
+      return done;
+    }
+    await this.requireTable(table);
+
+    // Clustering is a storage concern with no equivalent here.
+    if (!action.startsWith('rename') && !action.startsWith('swap')) return done;
+
+    const other = resolveTable(session, (match[4] ?? match[5]) as string);
+    if (!this.catalog.getSchema(other.database, other.schema)) {
+      throw objectNotFound('SCHEMA', `${other.database}.${other.schema}`);
+    }
+    const connection = await this.connectionFor(session);
+
+    if (action.startsWith('rename')) {
+      if (await this.engine.objectKind(other.database, other.schema, other.name)) {
+        throw new SnowflakeError(
+          '002002',
+          `SQL compilation error:\nObject '${displayName(other)}' already exists.`,
+          '42710',
+        );
+      }
+      if (table.database !== other.database) {
+        await this.moveAcrossDatabases(connection, table, other);
+      } else {
+        await this.inTransaction(connection, () => this.moveTable(connection, table, other));
+      }
+      return done;
+    }
+
+    await this.requireTable(other);
+    if (table.database !== other.database) {
+      // Three cross-database moves cannot be made atomic here.
+      throw unsupported('ALTER TABLE ... SWAP WITH a table in another database');
+    }
+    const parked = { ...table, name: `SNOWTEST_SWAP_${randomUUID().replace(/-/g, '').toUpperCase()}` };
+    await this.inTransaction(connection, async () => {
+      await this.moveTable(connection, table, parked);
+      await this.moveTable(connection, other, table);
+      await this.moveTable(connection, parked, other);
+    });
+    return done;
+  }
+
   // ---------------------------------------------------------------------------
   // USE / ALTER SESSION
   // ---------------------------------------------------------------------------
@@ -305,25 +575,16 @@ export class StatementRouter {
     const match = /^use\s+(?:(database|schema|warehouse|role)\s+)?(.+)$/i.exec(statement);
     if (!match) throw compilationError(`Invalid USE statement: ${statement}`);
 
-    const explicitScope = match[1]?.toUpperCase();
+    const scope = match[1]?.toUpperCase() ?? 'DATABASE';
     const target = match[2].trim().replace(/;+\s*$/, '');
-
-    let scope = explicitScope;
-    if (!scope) {
-      // Bare `USE x` means database.
-      scope = this.catalog.getDatabase(target) ? 'DATABASE' : 'DATABASE';
-    }
 
     if (scope === 'DATABASE') {
       const name = normalizeName(target);
-      if (!this.catalog.getDatabase(name)) throw objectNotFound('DATABASE', name);
+      if (!this.catalog.getDatabase(name)) throw objectNotFound('DATABASE', name, '002043');
       session.database = name;
       await this.engine.attachDatabase(name);
-      const schemas = this.catalog.listSchemas(name);
-      session.schema = schemas.some((schema) => schema.name === 'PUBLIC')
-        ? 'PUBLIC'
-        : schemas[0]?.name ?? 'PUBLIC';
-      await this.engine.createSchema(name, session.schema);
+      // Snowflake: PUBLIC if the database still has it, else no current schema.
+      session.schema = this.catalog.getSchema(name, 'PUBLIC') ? 'PUBLIC' : null;
       await this.connectionFor(session);
       return statusOutcome(`${name} successfully set.`, STATEMENT_TYPES.use);
     }
@@ -331,10 +592,9 @@ export class StatementRouter {
     if (scope === 'SCHEMA') {
       const { database, schema } = resolveSchema(session, target);
       if (!this.catalog.getSchema(database, schema)) {
-        // `USE SCHEMA a.b` should switch database too.
-        this.catalog.createSchema(database, schema);
-        await this.engine.createSchema(database, schema);
+        throw objectNotFound('SCHEMA', `${database}.${schema}`, '002043');
       }
+      // `USE SCHEMA a.b` switches database too.
       session.database = database;
       session.schema = schema;
       await this.connectionFor(session);
@@ -449,7 +709,7 @@ export class StatementRouter {
       }
 
       case 'schemas': {
-        const { database } = resolveSchema(session, inMatch?.[1] || undefined);
+        const database = resolveDatabase(session, inMatch?.[1] || undefined);
         const rows = this.catalog.listSchemas(database).map((schema) => [
           new Date(),
           schema.name,
@@ -716,7 +976,11 @@ export class StatementRouter {
       }
 
       case 'stages': {
-        const rows = [...this.catalog.stages.values()].map((stage) => [
+        const scope = stageScope(session, rest);
+        const inScope = (stage: { database: string; schema: string }): boolean =>
+          scope === null ||
+          (stage.database === scope.database && (scope.schema === null || stage.schema === scope.schema));
+        const rows = [...this.catalog.stages.values()].filter(inScope).map((stage) => [
           new Date(),
           stage.name,
           stage.database,
@@ -905,33 +1169,33 @@ export class StatementRouter {
           );
         }
         case 'warehouse': {
-          const { created, name: key } = this.catalog.createWarehouse(name);
+          const { created, name: key } = this.catalog.createWarehouse(normalizeName(name));
           return statusOutcome(
             created ? `${key} successfully created.` : `${key} already exists, statement succeeded.`,
             STATEMENT_TYPES.create,
           );
         }
         case 'role': {
-          const { created, name: key } = this.catalog.createRole(name);
+          const { created, name: key } = this.catalog.createRole(normalizeName(name));
           return statusOutcome(
             created ? `${key} successfully created.` : `${key} already exists, statement succeeded.`,
             STATEMENT_TYPES.create,
           );
         }
         case 'stage': {
-          const resolved = splitName(name);
-          const stageName = resolved.at(-1) ?? name;
-          const database = resolved.length >= 3 ? resolved[0] : session.database;
-          const schema = resolved.length >= 2 ? resolved[1] : session.schema;
-          const directory = await this.stages.directoryFor(database, schema, stageName);
+          const stage = resolveTable(session, name);
+          // A stage outside a known schema could not be restored after a restart.
+          if (!this.catalog.getSchema(stage.database, stage.schema)) {
+            throw objectNotFound('SCHEMA', `${stage.database}.${stage.schema}`);
+          }
+          const directory = await this.stages.directoryFor(stage.database, stage.schema, stage.name);
           this.catalog.createStage({
-            database,
-            schema,
-            name: stageName,
+            ...stage,
             url: /url\s*=\s*'([^']*)'/i.exec(rest)?.[1] ?? null,
             directory,
           });
-          return statusOutcome(`Stage area ${stageName} successfully created.`, STATEMENT_TYPES.create);
+          await this.dataDir?.saveStages(this.catalog.stages.values());
+          return statusOutcome(`Stage area ${stage.name} successfully created.`, STATEMENT_TYPES.create);
         }
         case 'file format':
           return statusOutcome('File format successfully created.', STATEMENT_TYPES.create);
@@ -942,29 +1206,46 @@ export class StatementRouter {
       }
     }
 
-    const drop = /^drop\s+(database|schema|warehouse|role|stage|file\s+format|user)\s+(?:if\s+exists\s+)?([\w$".]+)([\s\S]*)$/i.exec(
+    const drop = /^drop\s+(database|schema|warehouse|role|stage|file\s+format|user)\s+(if\s+exists\s+)?([\w$".]+)([\s\S]*)$/i.exec(
       statement,
     );
     if (drop) {
       const object = drop[1].toLowerCase().replace(/\s+/g, ' ');
-      const name = drop[2];
-      const rest = drop[3] ?? '';
+      const ifExists = Boolean(drop[2]);
+      const name = drop[3];
+      const rest = drop[4] ?? '';
+      const alreadyDropped = (key: string) =>
+        statusOutcome(`Drop statement executed successfully (${key} already dropped).`, STATEMENT_TYPES.drop);
       switch (object) {
         case 'database': {
           const key = normalizeName(name);
+          if (!this.catalog.getDatabase(key)) {
+            if (ifExists) return alreadyDropped(key);
+            throw objectNotFound('DATABASE', key);
+          }
+          await this.engine.dropDatabase(key);
           this.catalog.dropDatabase(key);
-          await this.engine.detachDatabase(key);
+          await this.removeStages(key);
+          // Snowflake leaves the session with no current database.
           if (session.database === key) {
-            session.database = this.catalog.databases.keys().next().value ?? 'SNOWTEST';
+            session.database = null;
+            session.schema = null;
           }
           return statusOutcome(`${key} successfully dropped.`, STATEMENT_TYPES.drop);
         }
         case 'schema': {
           const resolved = resolveSchema(session, name);
+          if (!this.catalog.getSchema(resolved.database, resolved.schema)) {
+            if (ifExists) return alreadyDropped(resolved.schema);
+            throw objectNotFound('SCHEMA', `${resolved.database}.${resolved.schema}`);
+          }
+          // Snowflake's default is CASCADE; RESTRICT refuses a schema that still holds objects.
+          await this.engine.dropSchema(resolved.database, resolved.schema, !/^\s*restrict\b/i.test(rest));
           this.catalog.dropSchema(resolved.database, resolved.schema);
-          await this.engine.dropSchema(resolved.database, resolved.schema, /cascade/i.test(rest)).catch(
-            () => undefined,
-          );
+          await this.removeStages(resolved.database, resolved.schema);
+          if (session.database === resolved.database && session.schema === resolved.schema) {
+            session.schema = null;
+          }
           return statusOutcome(`${resolved.schema} successfully dropped.`, STATEMENT_TYPES.drop);
         }
         case 'warehouse': {
@@ -978,12 +1259,10 @@ export class StatementRouter {
           return statusOutcome(`${key} successfully dropped.`, STATEMENT_TYPES.drop);
         }
         case 'stage': {
-          const resolved = splitName(name);
-          const database = resolved.length >= 3 ? resolved[0] : session.database;
-          const schema = resolved.length >= 2 ? resolved[1] : session.schema;
-          const stageName = resolved.at(-1) ?? name;
-          this.catalog.dropStage(database, schema, stageName);
-          await this.stages.removeAll(await this.stages.directoryFor(database, schema, stageName));
+          const stage = resolveTable(session, name);
+          this.catalog.dropStage(stage.database, stage.schema, stage.name);
+          await this.dataDir?.saveStages(this.catalog.stages.values());
+          await this.stages.removeAll(await this.stages.directoryFor(stage.database, stage.schema, stage.name));
           return statusOutcome('Stage area successfully dropped.', STATEMENT_TYPES.drop);
         }
         case 'file format':
@@ -997,6 +1276,8 @@ export class StatementRouter {
 
     // ALTER WAREHOUSE / ALTER ROLE / ALTER DATABASE are accepted as no-ops;
     // ALTER TABLE falls through to DuckDB.
+    if (/^alter\s+schema\s+(if\s+exists\s+)?\S+\s+rename\s+to\b/i.test(statement)) throw unsupported('ALTER SCHEMA ... RENAME TO');
+    if (/^alter\s+schema\s+(if\s+exists\s+)?\S+\s+swap\s+with\b/i.test(statement)) throw unsupported('ALTER SCHEMA ... SWAP WITH');
     if (/^alter\s+(warehouse|role|database|schema|session\s+parameter)\b/i.test(statement)) {
       return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.alter);
     }
@@ -1032,8 +1313,8 @@ export class StatementRouter {
 
     const name = parts[parts.length - 1];
     if (parts.length >= 3) return { database: parts[0], schema: parts[1], name, filePath };
-    if (parts.length === 2) return { database: session.database, schema: parts[0], name, filePath };
-    return { database: session.database, schema: session.schema, name, filePath };
+    if (parts.length === 2) return { database: currentDatabase(session), schema: parts[0], name, filePath };
+    return { database: currentDatabase(session), schema: currentSchema(session), name, filePath };
   }
 
   private async handleCopyInto(statement: string, session: Session): Promise<Outcome> {
@@ -1331,13 +1612,13 @@ export class StatementRouter {
   ): Promise<Outcome> {
     const connection = await this.connectionFor(session);
 
-    // A qualified CREATE/INSERT can target a schema that does not exist yet;
-    // refuse it the way Snowflake would rather than letting DuckDB guess.
-    const target = /^(?:create|insert\s+into|update|delete\s+from|drop|alter)\s+(?:or\s+replace\s+)?(?:table\s+|view\s+)?([\w$".]+)/i.exec(
-      statement,
-    );
-    if (target && !/^(table|view|if|temporary|temp)$/i.test(target[1])) {
+    // A target in a missing schema, or unqualified without context, fails as in Snowflake rather than letting DuckDB guess.
+    const target = WRITE_TARGET.exec(statement);
+    if (target) {
       const parts = splitName(target[1]);
+      const operation = operationOf(statement);
+      if (parts.length < 3) currentDatabase(session, operation);
+      if (parts.length < 2) currentSchema(session, operation);
       if (parts.length >= 3) {
         if (!this.catalog.getDatabase(parts[0])) throw objectNotFound('DATABASE', parts[0]);
         if (!this.catalog.getSchema(parts[0], parts[1])) {
@@ -1346,23 +1627,11 @@ export class StatementRouter {
       }
     }
 
-    const translated = rewrite(
-      statement,
-      {
-        database: session.database,
-        schema: session.schema,
-        role: session.role,
-        user: session.user,
-        warehouse: session.warehouse,
-      },
-      options.bindings ?? [],
-    );
-
-    const result = await connection.execute(translated);
+    const result = await this.executeTranslated(connection, statement, session, options);
     const columns = result.columns.map((column) =>
       buildColumn(column.name, column.duckType, true, {
-        database: session.database,
-        schema: session.schema,
+        database: session.database ?? '',
+        schema: session.schema ?? '',
         table: '',
       }),
     );
@@ -1414,6 +1683,30 @@ export class StatementRouter {
     }
 
     return { columns, rows, statementTypeId, rowsAffected: result.rowsChanged };
+  }
+
+  private async executeTranslated(
+    connection: EngineConnection,
+    statement: string,
+    session: Session,
+    options: ExecuteOptions,
+  ): Promise<QueryResult> {
+    const translated = rewrite(
+      statement,
+      {
+        database: session.database,
+        schema: session.schema,
+        role: session.role,
+        user: session.user,
+        warehouse: session.warehouse,
+      },
+      options.bindings ?? [],
+    );
+    try {
+      return await connection.execute(translated);
+    } catch (error) {
+      throw missingContext(error, statement, session) ?? error;
+    }
   }
 }
 
