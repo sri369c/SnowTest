@@ -202,7 +202,7 @@ ${surfaceRows}
 <ul>
   <li>Nothing here authenticates or authorises unless you configure a public key.</li>
   <li>Never expose it publicly or point real credentials at it.</li>
-  <li>Data lives in memory unless <code>SNOWTEST_DATA_DIR</code> is set (<code>setup.py</code> and <code>compose.yaml</code> set it).</li>
+  <li>Data lives in memory unless <code>SNOWTEST_DATA_DIR</code> is set. Persistence is opt-in: the launcher does not set it.</li>
 </ul>
 
 <footer>

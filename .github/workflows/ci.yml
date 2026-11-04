@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: node ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  connector:
+    # 4.x replays a result through RESULT_SCAN; 5.x fetches /queries/{id}/result.
+    # Both paths are supported, so both are tested against their own Python.
+    name: connector ${{ matrix.connector }} on py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - connector: '4.8.1'
+            python: '3.12'
+          - connector: '5.1.0'
+            python: '3.14'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: npm ci
+      - run: npm run test:py
+        env:
+          SNOWTEST_CONNECTOR: snowflake-connector-python==${{ matrix.connector }}
+
+  dbt:
+    name: dbt suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Ensure python3-venv and openssl are available
+        run: python3 -c "import venv, ensurepip" || (sudo apt-get update && sudo apt-get install -y python3-venv openssl)
+      - run: npm run test:dbt

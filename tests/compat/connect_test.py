@@ -264,11 +264,23 @@ def main() -> int:
             return
         raise AssertionError("expected a ProgrammingError for a missing table")
 
-    known_limitation(
-        "connector execute_async result polling",
-        "execute_async + get_results_from_sfqid needs driver plumbing we do not implement; "
-        "the SQL API v2 async path below is supported instead",
-    )
+    @check("execute_async + get_results_from_sfqid")
+    def _():
+        cur.execute_async("SELECT 41 + 1 AS n")
+        sfqid = cur.sfqid
+        assert sfqid, "execute_async returned no query id"
+        cur.get_results_from_sfqid(sfqid)
+        row = cur.fetchone()
+        assert row is not None and row[0] == 42, row
+
+    @check("multiple statements in one request are refused")
+    def _():
+        try:
+            q(cur, "SELECT 1; SELECT 2")
+        except snowflake.connector.errors.ProgrammingError as error:
+            assert "Multiple statements" in str(error), str(error)
+            return
+        raise AssertionError("expected a ProgrammingError for a batch")
 
     @check("SQL API v2 sync select")
     def _():

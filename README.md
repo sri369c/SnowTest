@@ -73,7 +73,7 @@ curl -s -X POST 'http://localhost:3030/api/v2/statements' \
 |---|---|---|
 | Driver protocol (`/session/v1/login-request`, `/queries/v1/query-request`, heartbeat, token refresh, logout, `/monitoring/queries`) | Implemented, verified against `snowflake-connector-python` 4.8 and 5.1, including gzip-encoded request bodies | Python connector, Snowpark, JDBC-style clients |
 | Key-pair (JWT) login, with optional signature verification | Implemented — see [Key-pair authentication](#key-pair-service-account-authentication) | dbt, service accounts |
-| Connector `execute_async` + `get_results_from_sfqid` | **Not supported** — see Limits | — |
+| Connector `execute_async` + `get_results_from_sfqid` | Implemented — the stored result is served through `RESULT_SCAN` | Python connector |
 | SQL REST API v2 (`/api/v2/statements`, async handles, cancel) | Implemented | HTTP integrations, curl, custom services |
 | SQL execution | DuckDB, with a Snowflake dialect layer | — |
 | `SHOW` / `DESCRIBE` / `USE` / `ALTER SESSION` | Implemented — incl. `SHOW TERSE OBJECTS/SCHEMAS/TABLES/VIEWS`, `SHOW PRIMARY/UNIQUE/IMPORTED KEYS` (always empty), `[<DB>.]information_schema.{columns,tables,views,schemata}` (incl. Snowflake-only `tables` columns read by `dbt docs generate`) | dbt, BI tools (SQLAlchemy reflection) and driver discovery |
@@ -253,7 +253,9 @@ Flags override environment variables. `setup.py` and `compose.yaml` set
 | `--database` | `SNOWTEST_DATABASE` | `SNOWTEST` |
 | `--schema` | `SNOWTEST_SCHEMA` | `PUBLIC` |
 | `--warehouse` | `SNOWTEST_WAREHOUSE` | `SNOWTEST_WH` |
+| `--data-dir` | `SNOWTEST_DATA_DIR` | unset — in memory |
 | `--verbose` | `SNOWTEST_VERBOSE` | off |
+| — | `SNOWTEST_ROLE` | `SYSADMIN` |
 | — | `SNOWTEST_STAGE_ROOT` | temp dir, per process |
 
 `SNOWTEST_DATABASES`, `SNOWTEST_WAREHOUSES`, `SNOWTEST_ROLES` and
@@ -302,10 +304,11 @@ Being explicit, because a stub that quietly lies is worse than no stub:
   `FIELD_OPTIONALLY_ENCLOSED_BY` and `NULL_IF` are ignored.
 - User stages (`@~`) and table stages (`@%table`) are not implemented.
 - No ODBC.
-- The connector's `execute_async` + `get_results_from_sfqid` result polling
-  is not implemented. Use the SQL API v2 async path
-  (`POST /api/v2/statements?async=true`, then `GET /api/v2/statements/{handle}`),
-  which is tested.
+- `execute_async` results are kept in process memory and fetched through
+  `RESULT_SCAN` (connector 4.x) or `GET /queries/{id}/result` (connector 5.x),
+  which accept only ids this process ran: a restart forgets them. The SQL API v2
+  async path (`POST /api/v2/statements?async=true`, then
+  `GET /api/v2/statements/{handle}`) is tested too.
 - Result paging returns a single partition; `arrow` result format is not
   emitted (JSON only).
 - Client protocols are version-sensitive. The suite pins
