@@ -255,6 +255,10 @@ def build_image(engine: str, image: str, args: argparse.Namespace,
                 *, no_cache: bool = False) -> None:
     note(f"building {image} with {engine}")
     cmd = [engine, "build", "-t", image]
+    # Podman defaults to the OCI format, which has nowhere to record a
+    # Dockerfile HEALTHCHECK; compose and CI then cannot wait for readiness.
+    if engine == "podman":
+        cmd.extend(["--format", "docker"])
     if no_cache:
         cmd.append("--no-cache")
     cmd.append(str(PROJECT_ROOT))

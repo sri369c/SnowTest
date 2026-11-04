@@ -319,16 +319,25 @@ export interface ExecuteOptions {
   bindings?: unknown[];
 }
 
+/** Account defaults, as configured: `SHOW …` reports them as `is_default`. */
+export interface RouterDefaults {
+  database?: string;
+  schema?: string;
+  warehouse?: string;
+  role?: string;
+}
+
 export class StatementRouter {
   constructor(
     private readonly engine: Engine,
     private readonly catalog: Catalog,
     readonly stages: StageStore = new StageStore(),
     private readonly dataDir: DataDir | null = null,
+    private readonly defaults: RouterDefaults = {},
   ) {}
 
   private async connectionFor(session: Session): Promise<EngineConnection> {
-    let connection = session.connection as EngineConnection | null;
+    let connection = session.connection;
     if (!connection) {
       connection = await this.engine.newConnection();
       session.connection = connection;
@@ -684,7 +693,7 @@ export class StatementRouter {
         const rows = [...this.catalog.databases.values()].map((db) => [
           db.createdAt,
           db.name,
-          db.name === 'SNOWTEST' ? 'Y' : 'N',
+          db.name === (this.defaults.database ?? 'SNOWTEST') ? 'Y' : 'N',
           db.name === session.database ? 'Y' : 'N',
           '',
           'SYSADMIN',
@@ -713,8 +722,10 @@ export class StatementRouter {
         const rows = this.catalog.listSchemas(database).map((schema) => [
           new Date(),
           schema.name,
-          'N',
-          database === session.database && schema.name === session.schema ? 'Y' : 'N',
+          database === (this.defaults.database ?? 'SNOWTEST') &&
+          schema.name === (this.defaults.schema ?? 'PUBLIC')
+            ? 'Y'
+            : 'N',
           database,
           'SYSADMIN',
           schema.comment,
@@ -900,7 +911,7 @@ export class StatementRouter {
           '1',
           '0',
           '0',
-          warehouse.name === session.warehouse ? 'Y' : 'N',
+          warehouse.name === (this.defaults.warehouse ?? 'SNOWTEST_WH') ? 'Y' : 'N',
           warehouse.name === session.warehouse ? 'Y' : 'N',
           String(warehouse.autoSuspendSeconds),
           warehouse.autoResume ? 'true' : 'false',
@@ -949,7 +960,7 @@ export class StatementRouter {
         const rows = [...this.catalog.roles.keys()].map((role) => [
           new Date(),
           role,
-          'N',
+          role === (this.defaults.role ?? 'SYSADMIN') ? 'Y' : 'N',
           role === session.role ? 'Y' : 'N',
           'N',
           '0',

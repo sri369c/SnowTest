@@ -560,11 +560,7 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
   {
     feature: 'Multiple statements per request',
     outcome:
-      'Not split: DuckDB runs every statement but only one result comes back, chosen by DuckDB rather than by Snowflake’s rules; routing (`SHOW`, `USE`, `DESCRIBE`, account DDL, `ALTER TABLE`) is decided by the first statement alone. `MULTI_STATEMENT_COUNT` is ignored. dbt and the connector’s `execute_string` split client-side.',
-  },
-  {
-    feature: 'Driver async execution (`execute_async`)',
-    outcome: 'Not polled. Use the SQL API with `async=true` for asynchronous work.',
+      'Refused with a compilation error. DuckDB would run the whole batch but return one result, while routing (`SHOW`, `USE`, `DESCRIBE`, account DDL, `ALTER TABLE`) followed the first statement alone — a batch could look like it worked. `MULTI_STATEMENT_COUNT` is ignored. dbt and the connector’s `execute_string` split client-side.',
   },
   {
     feature: 'LATERAL FLATTEN and table functions',

@@ -1,5 +1,7 @@
 // Copyright (c) 2026 Srinivas Chaturvedula
 
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import type { SnowtestConfig } from '../src/config.js';
@@ -127,6 +129,29 @@ describe('landing page', () => {
     for (const surface of LANDING_SURFACES) {
       expect(html).toContain(`href="/operations#${surface.id}"`);
       expect(html).toContain(`${surface.supported} of ${surface.total} supported`);
+    }
+  });
+});
+
+describe('operations endpoints', () => {
+  const normalize = (path: string): string =>
+    path.replace(/\{[^}]+\}/g, '*').replace(/\[/g, '').replace(/\]/g, '').replace(/:[^/]+/g, '*');
+
+  it('documents only endpoints the server actually routes', () => {
+    const source = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+    const routes = new Set(
+      [...source.matchAll(/app\.(?:get|post|all|put|delete)\('([^']+)'/g)].map((match) =>
+        normalize(match[1]),
+      ),
+    );
+
+    const documented = GROUPS.flatMap((group) => group.rows)
+      .map((row) => /^(?:GET|POST|PUT|DELETE|PATCH|ALL)\s+(\/\S*?)(?:\?.*)?$/.exec(row.syntax.trim()))
+      .filter((match): match is RegExpExecArray => match !== null);
+
+    expect(documented.length).toBeGreaterThan(0);
+    for (const [, path] of documented) {
+      expect(routes.has(normalize(path)), `${path} is documented but not routed`).toBe(true);
     }
   });
 });

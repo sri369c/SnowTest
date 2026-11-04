@@ -18,8 +18,16 @@ import { Hono, type Context } from 'hono';
 
 import { Catalog, normalizeName } from './catalog.js';
 import { loadConfig, type SnowtestConfig } from './config.js';
-import { Engine, quoteIdent, type EngineConnection } from './engine.js';
-import { SnowflakeError, authError, mapEngineError, sessionExpired } from './errors.js';
+import { hasMultipleStatements } from './dialect.js';
+import { Engine, quoteIdent } from './engine.js';
+import {
+  SnowflakeError,
+  authError,
+  compilationError,
+  mapEngineError,
+  multipleStatements,
+  sessionExpired,
+} from './errors.js';
 import {
   PREVIEW_LIMIT,
   renderMissing,
@@ -255,7 +263,29 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
   >();
   const sessions = new SessionRegistry();
-  const router = new StatementRouter(engine, catalog, new StageStore(), dataDir);
+  const router = new StatementRouter(engine, catalog, new StageStore(), dataDir, {
+    database: config.defaultDatabase,
+    schema: config.defaultSchema,
+    warehouse: config.defaultWarehouse,
+    role: config.defaultRole,
+  });
+
+  // Every successful result, so RESULT_SCAN can serve an earlier query id.
+  const results = new Map<string, { outcome: Outcome; session: Session }>();
+
+  // `get_results_from_sfqid` asks for the result again as
+  // `SELECT * FROM TABLE(RESULT_SCAN('<id>'))`; answer from memory rather than
+  // forwarding a table function DuckDB does not have.
+  const RESULT_SCAN =
+    /^\s*select\s+\*\s+from\s+(?:table\s*\(\s*)?result_scan\s*\(\s*'([^']+)'\s*\)\s*\)?\s*;?\s*$/i;
+
+  const scannedOutcome = (sql: string): Outcome | null => {
+    const match = RESULT_SCAN.exec(sql);
+    if (!match) return null;
+    const stored = results.get(match[1]) ?? asyncResults.get(match[1]);
+    if (!stored) throw compilationError(`Invalid query id '${match[1]}'.`);
+    return stored.outcome;
+  };
 
   // Persisted databases come back first, so their schemas and stages can be restored.
   const persisted = dataDir ? await dataDir.databases() : [];
@@ -501,7 +531,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
   app.post('/_snowtest/reset', async (c) => {
     for (const session of sessions.all()) {
-      const connection = session.connection as EngineConnection | null;
+      const connection = session.connection;
       connection?.close();
       session.connection = null;
     }
@@ -687,7 +717,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       const session = sessions.delete(token);
       if (session) {
         log(`logout session=${session.id} user=${session.user}`);
-        const connection = session.connection as EngineConnection | null;
+        const connection = session.connection;
         connection?.close();
         session.connection = null;
       }
@@ -722,10 +752,14 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
     const startedAt = Date.now();
     try {
-      const outcome = await router.execute(sql, session, {
-        bindings: normalizeBindings(body.bindings),
-      });
+      if (hasMultipleStatements(sql)) throw multipleStatements();
+      const outcome =
+        scannedOutcome(sql) ??
+        (await router.execute(sql, session, {
+          bindings: normalizeBindings(body.bindings),
+        }));
       logQuery('driver', session, startedAt, sql, outcome);
+      results.set(queryId, { outcome, session });
 
       // PUT/GET: the client acts on this descriptor directly (it moves the
       // bytes), so the response data *is* the file-transfer payload.
@@ -931,8 +965,11 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
     const startedAt = Date.now();
     try {
-      const outcome = await router.execute(statement, session, { bindings });
+      if (hasMultipleStatements(statement)) throw multipleStatements();
+      const outcome =
+        scannedOutcome(statement) ?? (await router.execute(statement, session, { bindings }));
       logQuery('api', session, startedAt, statement, outcome);
+      results.set(queryId, { outcome, session });
       const response = sqlApiResult(session, outcome, queryId, statementHandle);
       statements.set(statementHandle, {
         outcome,
@@ -1080,7 +1117,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     },
     async close() {
       for (const session of sessions.all()) {
-        const connection = session.connection as EngineConnection | null;
+        const connection = session.connection;
         connection?.close();
         session.connection = null;
       }

@@ -428,12 +428,14 @@ That produced two convincing but false failures during development.
 - **Not a security boundary.** Permissive by default; even in verified mode
   there is no user, role or privilege model, and no TLS.
 - In memory by default: data lives for the process lifetime unless
-  `SNOWTEST_DATA_DIR` is set (`setup.py` and `compose.yaml` set it).
-- Several `;`-separated statements in one request are not split: DuckDB runs
-  them all and returns one result; routing follows the first statement.
-- Connector `execute_async` + `get_results_from_sfqid` is not implemented. The
-  SQL API v2 async path (`?async=true`, then `GET /api/v2/statements/{handle}`)
-  is, and is tested.
+  `SNOWTEST_DATA_DIR` is set. Persistence is opt-in; the launcher does not set
+  it.
+- Several `;`-separated statements in one request are refused with a
+  compilation error rather than run as a batch, because DuckDB would return one
+  result while routing followed the first statement.
+- Connector `execute_async` + `get_results_from_sfqid` is supported: results are
+  held in process memory and served through `RESULT_SCAN`. The SQL API v2 async
+  path (`?async=true`, then `GET /api/v2/statements/{handle}`) is too.
 - No `COPY INTO @stage` (unload), no user (`@~`) or table (`@%table`) stages.
 - No UDFs, stored procedures, tasks, streams, dynamic tables, replication,
   Snowpark, Snowpipe Streaming, `PUT`/`GET` encryption.
