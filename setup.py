@@ -44,7 +44,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONTAINER = "snowtest"
 CONTAINER_PORT = 3030
-DEFAULT_IMAGE = "snowtest:1.0.0"
+DEFAULT_IMAGE = "snowtest:2.0.0"
 DEFAULT_NETWORK = "snowtest-network"
 ACCOUNT = "SNOWTEST"
 DATABASE = "SNOWTEST"
@@ -259,6 +259,9 @@ def build_image(engine: str, image: str, args: argparse.Namespace,
         cmd.append("--no-cache")
     cmd.append(str(PROJECT_ROOT))
     run(cmd, dry=args.dry_run)
+    # Retagging leaves the previous image unnamed and unreferenced. Prune only
+    # those: without --all, a tagged image is never removed, even when unused.
+    run([engine, "image", "prune", "-f"], dry=args.dry_run, check=False)
 
 
 def remove_container(engine: str, args: argparse.Namespace) -> bool:
