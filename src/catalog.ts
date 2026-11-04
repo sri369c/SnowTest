@@ -61,6 +61,10 @@ export function normalizeName(name: string): string {
   return trimmed.toUpperCase();
 }
 
+/**
+ * Every name passed to a Catalog method is a canonical key: `normalizeName` is
+ * applied once, where SQL text or configuration enters, never again here.
+ */
 export class Catalog {
   readonly databases = new Map<string, DatabaseDef>();
   readonly warehouses = new Map<string, WarehouseDef>();
@@ -69,16 +73,10 @@ export class Catalog {
 
   constructor(init: CatalogInit = {}) {
     for (const role of init.roles ?? ['ACCOUNTADMIN', 'SYSADMIN', 'PUBLIC']) {
-      this.roles.set(normalizeName(role), { name: normalizeName(role) });
+      this.createRole(role);
     }
     for (const warehouse of init.warehouses ?? ['SNOWTEST_WH']) {
-      this.warehouses.set(normalizeName(warehouse), {
-        name: normalizeName(warehouse),
-        size: 'X-SMALL',
-        state: 'STARTED',
-        autoSuspendSeconds: 600,
-        autoResume: true,
-      });
+      this.createWarehouse(warehouse);
     }
     const databases = init.databases ?? [{ name: 'SNOWTEST', schemas: ['PUBLIC'] }];
     for (const database of databases) {
@@ -89,8 +87,7 @@ export class Catalog {
     }
   }
 
-  createDatabase(name: string): { created: boolean; name: string } {
-    const key = normalizeName(name);
+  createDatabase(key: string): { created: boolean; name: string } {
     if (this.databases.has(key)) return { created: false, name: key };
     this.databases.set(key, {
       name: key,
@@ -101,55 +98,43 @@ export class Catalog {
     return { created: true, name: key };
   }
 
-  dropDatabase(name: string): boolean {
-    return this.databases.delete(normalizeName(name));
+  dropDatabase(key: string): boolean {
+    return this.databases.delete(key);
   }
 
-  getDatabase(name: string): DatabaseDef | undefined {
-    return this.databases.get(normalizeName(name));
+  getDatabase(key: string): DatabaseDef | undefined {
+    return this.databases.get(key);
   }
 
   createSchema(database: string, schema: string): { created: boolean; database: string; schema: string } {
-    const dbKey = normalizeName(database);
-    const db = this.databases.get(dbKey);
+    const db = this.databases.get(database);
     if (!db) {
-      throw new Error(`Database '${dbKey}' does not exist.`);
+      throw new Error(`Database '${database}' does not exist.`);
     }
-    const schemaKey = normalizeName(schema);
-    const existed = db.schemas.has(schemaKey);
+    const existed = db.schemas.has(schema);
     if (!existed) {
-      db.schemas.set(schemaKey, { name: schemaKey, comment: null });
+      db.schemas.set(schema, { name: schema, comment: null });
     }
-    return { created: !existed, database: dbKey, schema: schemaKey };
+    return { created: !existed, database, schema };
   }
 
   dropSchema(database: string, schema: string): boolean {
-    const db = this.databases.get(normalizeName(database));
+    const db = this.databases.get(database);
     if (!db) return false;
-    return db.schemas.delete(normalizeName(schema));
+    return db.schemas.delete(schema);
   }
 
   getSchema(database: string, schema: string): SchemaDef | undefined {
-    return this.databases.get(normalizeName(database))?.schemas.get(normalizeName(schema));
+    return this.databases.get(database)?.schemas.get(schema);
   }
 
   listSchemas(database: string): SchemaDef[] {
-    const db = this.databases.get(normalizeName(database));
+    const db = this.databases.get(database);
     if (!db) return [];
     return [...db.schemas.values()];
   }
 
-  /** First database that declares this schema name, used for two-part names. */
-  findDatabaseForSchema(schema: string): string | undefined {
-    const key = normalizeName(schema);
-    for (const db of this.databases.values()) {
-      if (db.schemas.has(key)) return db.name;
-    }
-    return undefined;
-  }
-
-  createWarehouse(name: string): { created: boolean; name: string } {
-    const key = normalizeName(name);
+  createWarehouse(key: string): { created: boolean; name: string } {
     if (this.warehouses.has(key)) return { created: false, name: key };
     this.warehouses.set(key, {
       name: key,
@@ -161,27 +146,35 @@ export class Catalog {
     return { created: true, name: key };
   }
 
-  dropWarehouse(name: string): boolean {
-    return this.warehouses.delete(normalizeName(name));
+  dropWarehouse(key: string): boolean {
+    return this.warehouses.delete(key);
   }
 
-  createRole(name: string): { created: boolean; name: string } {
-    const key = normalizeName(name);
+  createRole(key: string): { created: boolean; name: string } {
     const existed = this.roles.has(key);
     if (!existed) this.roles.set(key, { name: key });
     return { created: !existed, name: key };
   }
 
-  dropRole(name: string): boolean {
-    return this.roles.delete(normalizeName(name));
+  dropRole(key: string): boolean {
+    return this.roles.delete(key);
   }
 
   createStage(stage: StageDef): void {
-    this.stages.set(`${normalizeName(stage.database)}.${normalizeName(stage.schema)}.${normalizeName(stage.name)}`, stage);
+    this.stages.set(`${stage.database}.${stage.schema}.${stage.name}`, stage);
   }
 
   dropStage(database: string, schema: string, name: string): boolean {
-    return this.stages.delete(`${normalizeName(database)}.${normalizeName(schema)}.${normalizeName(name)}`);
+    return this.stages.delete(`${database}.${schema}.${name}`);
+  }
+
+  /** Remove every stage in a database, or in one of its schemas. */
+  dropStagesIn(database: string, schema?: string): void {
+    for (const [key, stage] of this.stages) {
+      if (stage.database === database && (schema === undefined || stage.schema === schema)) {
+        this.stages.delete(key);
+      }
+    }
   }
 
   snapshot(): CatalogSnapshot {

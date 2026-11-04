@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 Srinivas Chaturvedula
 
-# End-to-end check: dbt-snowflake authenticating with an RSA key pair against
+# End-to-end check: dbt authenticating with an RSA key pair against
 # snowtest, then running view / table / incremental models and schema tests.
 set -euo pipefail
 
@@ -26,7 +26,7 @@ if [ ! -x "$PY" ]; then
   "$PY" -m pip install -q --disable-pip-version-check snowflake-connector-python
 fi
 if ! "$PY" -c "import dbt.adapters.snowflake" >/dev/null 2>&1; then
-  echo "installing dbt-snowflake into .venv…"
+  echo "installing dbt into .venv…"
   "$PY" -m pip install -q --disable-pip-version-check dbt-snowflake
 fi
 

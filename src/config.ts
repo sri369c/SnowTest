@@ -4,6 +4,8 @@
 
 import { readFileSync } from 'node:fs';
 
+import { normalizeName } from './catalog.js';
+
 export interface SnowtestConfig {
   port: number;
   host: string;
@@ -27,6 +29,8 @@ export interface SnowtestConfig {
   roles: string[];
   /** Verbose per-request logging (never logs passwords). */
   verbose: boolean;
+  /** Directory for file-backed databases; null keeps everything in memory. */
+  dataDir: string | null;
 }
 
 /** Baseline values; `--help` and the `/usage` page render these as the defaults. */
@@ -44,12 +48,22 @@ export const DEFAULTS: SnowtestConfig = {
   warehouses: ['SNOWTEST_WH'],
   roles: ['ACCOUNTADMIN', 'SYSADMIN', 'PUBLIC'],
   verbose: false,
+  dataDir: null,
 };
 
-function readNumber(value: string | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
+/** A TCP port, 1–65535. Anything else is a startup error. */
+export function parsePort(value: string, source: string): number {
+  const port = /^\d+$/.test(value.trim()) ? Number(value.trim()) : Number.NaN;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${source} must be a port number between 1 and 65535, got '${value}'.`);
+  }
+  return port;
+}
+
+function readBoolean(value: string | undefined, name: string): boolean {
+  if (value === undefined || value === '' || value === '0' || value === 'false') return false;
+  if (value === '1' || value === 'true') return true;
+  throw new Error(`${name} must be 1, true, 0 or false, got '${value}'.`);
 }
 
 /**
@@ -82,7 +96,7 @@ export function loadConfig(overrides: Partial<SnowtestConfig> = {}): SnowtestCon
   const env = process.env;
   const config: SnowtestConfig = {
     ...DEFAULTS,
-    port: readNumber(env.SNOWTEST_PORT, DEFAULTS.port),
+    port: env.SNOWTEST_PORT ? parsePort(env.SNOWTEST_PORT, 'SNOWTEST_PORT') : DEFAULTS.port,
     host: env.SNOWTEST_HOST ?? DEFAULTS.host,
     account: env.SNOWTEST_ACCOUNT ?? DEFAULTS.account,
     defaultDatabase: env.SNOWTEST_DATABASE ?? DEFAULTS.defaultDatabase,
@@ -96,7 +110,8 @@ export function loadConfig(overrides: Partial<SnowtestConfig> = {}): SnowtestCon
     warehouses: readList(env.SNOWTEST_WAREHOUSES) ?? DEFAULTS.warehouses,
     roles: readList(env.SNOWTEST_ROLES) ?? DEFAULTS.roles,
     jwtPublicKey: readPublicKey(env.SNOWTEST_JWT_PUBLIC_KEY),
-    verbose: env.SNOWTEST_VERBOSE === '1' || env.SNOWTEST_VERBOSE === 'true',
+    verbose: readBoolean(env.SNOWTEST_VERBOSE, 'SNOWTEST_VERBOSE'),
+    dataDir: env.SNOWTEST_DATA_DIR || DEFAULTS.dataDir,
     ...overrides,
   };
 
@@ -105,8 +120,20 @@ export function loadConfig(overrides: Partial<SnowtestConfig> = {}): SnowtestCon
   if (overrides.jwtPublicKey !== undefined) config.jwtPublicKey = overrides.jwtPublicKey;
   if (overrides.databases) config.databases = overrides.databases;
 
+  // Identifiers become canonical keys here, once; nothing downstream re-folds them.
+  config.defaultDatabase = normalizeName(config.defaultDatabase);
+  config.defaultSchema = normalizeName(config.defaultSchema);
+  config.defaultWarehouse = normalizeName(config.defaultWarehouse);
+  config.defaultRole = normalizeName(config.defaultRole);
+  config.databases = config.databases.map((db) => ({
+    name: normalizeName(db.name),
+    schemas: db.schemas.map(normalizeName),
+  }));
+  config.warehouses = config.warehouses.map(normalizeName);
+  config.roles = config.roles.map(normalizeName);
+
   // The default database must exist, or every unqualified query fails.
-  if (!config.databases.some((db) => db.name.toUpperCase() === config.defaultDatabase.toUpperCase())) {
+  if (!config.databases.some((db) => db.name === config.defaultDatabase)) {
     config.databases.push({ name: config.defaultDatabase, schemas: [config.defaultSchema] });
   }
   return config;

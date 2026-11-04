@@ -32,6 +32,7 @@ import { renderOperations } from './operations.js';
 import { renderUsage } from './usage.js';
 import { PACKAGE_VERSION } from './version.js';
 import { StatementRouter, type Outcome } from './meta.js';
+import { DataDir } from './persist.js';
 import {
   SERVER_VERSION,
   driverErrorResponse,
@@ -43,6 +44,7 @@ import {
   tokenResponse,
 } from './protocol.js';
 import { Session, SessionRegistry } from './session.js';
+import { StageStore } from './stage.js';
 
 interface StoredStatement {
   outcome: Outcome;
@@ -234,7 +236,8 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     warehouses: config.warehouses,
     roles: config.roles,
   });
-  const engine = await Engine.create();
+  const dataDir = config.dataDir ? await DataDir.open(config.dataDir) : null;
+  const engine = await Engine.create(dataDir);
   const statements = new Map<string, StoredStatement>();
   // Results of statements submitted with asyncExec, served via getResultUrl.
   const asyncResults = new Map<string, { outcome: Outcome; session: Session }>();
@@ -252,13 +255,33 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
   >();
   const sessions = new SessionRegistry();
-  const router = new StatementRouter(engine, catalog);
+  const router = new StatementRouter(engine, catalog, new StageStore(), dataDir);
 
+  // Persisted databases come back first, so their schemas and stages can be restored.
+  const persisted = dataDir ? await dataDir.databases() : [];
+  for (const name of persisted) catalog.createDatabase(name);
   for (const database of catalog.databases.values()) {
     await engine.attachDatabase(database.name);
     for (const schema of database.schemas.keys()) {
       await engine.createSchema(database.name, schema);
     }
+  }
+  if (dataDir) {
+    for (const database of catalog.databases.values()) {
+      for (const schema of await engine.listSchemas(database.name)) {
+        catalog.createSchema(database.name, schema);
+      }
+    }
+    for (const stage of await dataDir.loadStages()) {
+      if (!catalog.getSchema(stage.database, stage.schema)) {
+        throw new Error(`Persisted stage ${stage.database}.${stage.schema}.${stage.name} has no schema.`);
+      }
+      catalog.createStage({
+        ...stage,
+        directory: await router.stages.directoryFor(stage.database, stage.schema, stage.name),
+      });
+    }
+    log(`data dir ${dataDir.root}: restored ${persisted.length} database file(s), ${catalog.stages.size} stage(s)`);
   }
 
   const app = new Hono();
@@ -486,6 +509,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       await engine.detachDatabase(database);
     }
     catalog.databases.clear();
+    await dataDir?.clear();
 
     // Account objects and statement handles created by a test must not survive
     // a reset either: "the closest thing to a clean Snowflake account" is the
@@ -528,14 +552,11 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     const clientAppId = String(data.CLIENT_APP_ID ?? 'snowtest');
     const clientAppVersion = String(data.CLIENT_APP_VERSION ?? '0.1.0');
 
-    const requestedDatabase =
-      url.searchParams.get('databaseName') || String(data.DATABASE_NAME ?? config.defaultDatabase);
-    const requestedSchema =
-      url.searchParams.get('schemaName') || String(data.SCHEMA_NAME ?? config.defaultSchema);
-    const requestedWarehouse =
-      url.searchParams.get('warehouseName') || String(data.WAREHOUSE_NAME ?? config.defaultWarehouse);
-    const requestedRole =
-      url.searchParams.get('roleName') || String(data.ROLE_NAME ?? config.defaultRole);
+    // Only client-supplied names are folded; config defaults are already canonical.
+    const requestedDatabase = url.searchParams.get('databaseName') || String(data.DATABASE_NAME ?? '');
+    const requestedSchema = url.searchParams.get('schemaName') || String(data.SCHEMA_NAME ?? '');
+    const requestedWarehouse = url.searchParams.get('warehouseName') || String(data.WAREHOUSE_NAME ?? '');
+    const requestedRole = url.searchParams.get('roleName') || String(data.ROLE_NAME ?? '');
 
     if (config.users.length > 0 && !config.users.map((u) => u.toUpperCase()).includes(user.toUpperCase())) {
       throw authError();
@@ -574,28 +595,27 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       }
     }
 
-    let database = requestedDatabase.trim().toUpperCase() || config.defaultDatabase;
-    // A test stub is friendlier when an unknown default database is created on
-    // demand than when every client has to boot the schema first.
+    const database = normalizeName(requestedDatabase) || config.defaultDatabase;
+    // Login creates the requested (or default) database, schema and warehouse if unknown.
     if (!catalog.getDatabase(database)) {
       catalog.createDatabase(database);
       await engine.attachDatabase(database);
       catalog.createSchema(database, 'PUBLIC');
       await engine.createSchema(database, 'PUBLIC');
     }
-    const schema = requestedSchema.trim().toUpperCase() || config.defaultSchema;
+    const schema = normalizeName(requestedSchema) || config.defaultSchema;
     if (!catalog.getSchema(database, schema)) {
       catalog.createSchema(database, schema);
       await engine.createSchema(database, schema);
     }
-    const warehouse = requestedWarehouse.trim().toUpperCase() || config.defaultWarehouse;
+    const warehouse = normalizeName(requestedWarehouse) || config.defaultWarehouse;
     if (!catalog.warehouses.has(warehouse)) catalog.createWarehouse(warehouse);
 
     return new Session(
       {
         id: sessions.allocateId(),
         user,
-        role: requestedRole.trim().toUpperCase() || config.defaultRole,
+        role: normalizeName(requestedRole) || config.defaultRole,
         database,
         schema,
         warehouse,
@@ -868,14 +888,18 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     const issuer = typeof claims.iss === 'string' ? claims.iss : '';
     const user = issuer.includes('.') ? issuer.split('.')[1] : issuer || 'SNOWTEST_USER';
 
+    // Config defaults are already canonical; folding them again would lose quoted case.
+    const requested = (key: string): string => normalizeName(String(body[key] ?? ''));
+    const database = requested('database') || config.defaultDatabase;
+    const schema = requested('schema') || config.defaultSchema;
     const session = new Session(
       {
         id: sessions.allocateId(),
         user: user.toUpperCase(),
-        role: String(body.role ?? config.defaultRole).toUpperCase(),
-        database: String(body.database ?? config.defaultDatabase).toUpperCase(),
-        schema: String(body.schema ?? config.defaultSchema).toUpperCase(),
-        warehouse: String(body.warehouse ?? config.defaultWarehouse).toUpperCase(),
+        role: requested('role') || config.defaultRole,
+        database,
+        schema,
+        warehouse: requested('warehouse') || config.defaultWarehouse,
       },
       catalog,
     );
@@ -890,15 +914,15 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       }
     }
 
-    if (!catalog.getDatabase(session.database)) {
-      catalog.createDatabase(session.database);
-      await engine.attachDatabase(session.database);
-      catalog.createSchema(session.database, 'PUBLIC');
-      await engine.createSchema(session.database, 'PUBLIC');
+    if (!catalog.getDatabase(database)) {
+      catalog.createDatabase(database);
+      await engine.attachDatabase(database);
+      catalog.createSchema(database, 'PUBLIC');
+      await engine.createSchema(database, 'PUBLIC');
     }
-    if (!catalog.getSchema(session.database, session.schema)) {
-      catalog.createSchema(session.database, session.schema);
-      await engine.createSchema(session.database, session.schema);
+    if (!catalog.getSchema(database, schema)) {
+      catalog.createSchema(database, schema);
+      await engine.createSchema(database, schema);
     }
 
     const statementHandle = randomUUID().replace(/-/g, '').toUpperCase();

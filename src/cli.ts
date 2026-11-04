@@ -4,28 +4,42 @@
 /** Command-line entry point: `snowtest [--port 8080]`. */
 
 import { createServer } from './server.js';
-import { loadConfig, type SnowtestConfig } from './config.js';
+import { loadConfig, parsePort, type SnowtestConfig } from './config.js';
 import { OPTIONS, helpText } from './options.js';
 import { SERVER_VERSION } from './protocol.js';
 import { PACKAGE_VERSION } from './version.js';
 
+function fail(message: string): never {
+  console.error(`snowtest: ${message}\nRun 'snowtest --help' for the list of flags.`);
+  process.exit(2);
+}
+
+/** Parse against the option table: unknown flags, stray arguments and missing values are errors. */
 function parseFlags(argv: string[]): Record<string, string> {
+  const known = new Map(OPTIONS.map((option) => [option.flag.slice(2), option]));
   const flags: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (!arg.startsWith('--')) continue;
-    const [key, inlineValue] = arg.slice(2).split('=');
-    if (inlineValue !== undefined) {
-      flags[key] = inlineValue;
+    if (!arg.startsWith('--')) fail(`unexpected argument '${arg}'`);
+    const eq = arg.indexOf('=');
+    const key = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+    const inlineValue = eq === -1 ? undefined : arg.slice(eq + 1);
+    const option = known.get(key);
+    if (!option) fail(`unknown flag '--${key}'`);
+
+    if (!option.argument) {
+      if (inlineValue !== undefined && inlineValue !== 'true' && inlineValue !== 'false') {
+        fail(`--${key} takes no value or =true/=false, got '${inlineValue}'`);
+      }
+      flags[key] = inlineValue ?? 'true';
       continue;
     }
-    const next = argv[i + 1];
-    if (next && !next.startsWith('--')) {
-      flags[key] = next;
-      i += 1;
-    } else {
-      flags[key] = 'true';
+    const value = inlineValue ?? argv[i + 1];
+    if (value === undefined || (inlineValue === undefined && value.startsWith('--'))) {
+      fail(`--${key} needs a value`);
     }
+    if (inlineValue === undefined) i += 1;
+    flags[key] = value;
   }
   return flags;
 }
@@ -42,31 +56,26 @@ if (flags.help === 'true') {
   process.exit(0);
 }
 
-/**
- * Map the flags onto config fields through the shared option table, so a flag
- * that is offered by `--help` cannot be silently ignored on the way in.
- */
+/** Map the flags onto config fields through the shared option table. */
 function configOverrides(parsed: Record<string, string>): Partial<SnowtestConfig> {
   const overrides: Record<string, unknown> = {};
   for (const option of OPTIONS) {
     if (!option.configKey) continue;
     const raw = parsed[option.flag.replace(/^--/, '')];
     if (raw === undefined) continue;
-    if (option.type === 'boolean') {
-      if (raw === 'true') overrides[option.configKey] = true;
-      continue;
-    }
-    if (option.type === 'number') {
-      const parsedNumber = Number.parseInt(raw, 10);
-      if (Number.isFinite(parsedNumber)) overrides[option.configKey] = parsedNumber;
-      continue;
-    }
-    overrides[option.configKey] = raw;
+    if (option.type === 'boolean') overrides[option.configKey] = raw === 'true';
+    else if (option.type === 'number') overrides[option.configKey] = parsePort(raw, option.flag);
+    else overrides[option.configKey] = raw;
   }
   return overrides as Partial<SnowtestConfig>;
 }
 
-const config = loadConfig(configOverrides(flags));
+let config: SnowtestConfig;
+try {
+  config = loadConfig(configOverrides(flags));
+} catch (error) {
+  fail(error instanceof Error ? error.message : String(error));
+}
 
 const server = await createServer(config);
 const running = await server.listen();

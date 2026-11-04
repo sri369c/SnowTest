@@ -41,6 +41,7 @@ export interface SessionOptions {
   id: number;
   user: string;
   role: string;
+  /** Canonical keys (see catalog.ts). */
   database: string;
   schema: string;
   warehouse: string;
@@ -52,8 +53,9 @@ export class Session {
   readonly id: number;
   readonly user: string;
   role: string;
-  database: string;
-  schema: string;
+  /** null after the current database (schema) is dropped, as in Snowflake. */
+  database: string | null;
+  schema: string | null;
   warehouse: string;
   readonly clientAppId: string;
   readonly clientAppVersion: string;
@@ -68,9 +70,9 @@ export class Session {
     this.id = options.id;
     this.user = options.user;
     this.role = options.role;
-    this.database = normalizeName(options.database);
-    this.schema = normalizeName(options.schema);
-    this.warehouse = normalizeName(options.warehouse);
+    this.database = options.database;
+    this.schema = options.schema;
+    this.warehouse = options.warehouse;
     this.clientAppId = options.clientAppId ?? 'snowtest';
     this.clientAppVersion = options.clientAppVersion ?? '0.1.0';
     this.catalog = catalog;

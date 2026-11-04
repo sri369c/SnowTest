@@ -4,11 +4,11 @@
 
 A Snowflake-compatible stub server for testing systems that expect a real
 Snowflake account. This document explains **what was built, why it is shaped
-this way, and where the sharp edges are**. For commands, see
-[usage.md](./usage.md).
+this way, and where the sharp edges are**. For commands, see the README and the
+running server's `/usage` page.
 
-- **Status:** working, verified against `snowflake-connector-python` 4.8 and
-  5.1, `dbt-core` 1.12 / `dbt-snowflake` 1.12 over key-pair auth.
+- **Status:** working, verified against `snowflake-connector-python` 3.16, 4.8
+  and 5.1, dbt 1.12 over key-pair and password auth.
 - **Not** a Snowflake replacement: no warehouses, no privileges, no cloud
   storage, no multi-node behaviour.
 
@@ -23,7 +23,7 @@ cost:
 | Surface | Consumer | Why it matters |
 |---|---|---|
 | SQL REST API v2 | curl, HTTP integrations, custom services | documented, cheap to implement |
-| Driver protocol (undocumented) | `snowflake-connector-python`, `dbt-snowflake`, Snowpark, JDBC-style clients | the one that matters: point dbt at `localhost` and it believes it is talking to Snowflake |
+| Driver protocol (undocumented) | `snowflake-connector-python`, dbt, Snowpark, JDBC-style clients | the one that matters: point dbt at `localhost` and it believes it is talking to Snowflake |
 | ODBC | Power BI, Excel, Tableau | native C driver, own encoding — out of scope |
 
 A stub that only *pattern-matches* SQL is useless the moment a test writes real
@@ -38,7 +38,7 @@ the statements.**
 flowchart LR
   subgraph clients[Clients under test]
     PY["snowflake-connector-python"]
-    DBT["dbt-snowflake"]
+    DBT["dbt"]
     RAW["curl / SQL API clients"]
   end
 
@@ -82,6 +82,7 @@ src/server.ts    HTTP routes, gzip decoding, request/response plumbing
 src/meta.ts      statement router: metadata/side-effecting SQL vs DuckDB
 src/dialect.ts   Snowflake → DuckDB translation
 src/engine.ts    DuckDB instance, per-session connections, catalog introspection
+src/persist.ts   SNOWTEST_DATA_DIR: one DuckDB file per database, stage definitions
 src/types.ts     type mapping + per-surface row encoding
 src/protocol.ts  response envelopes (driver vs SQL API v2)
 src/home.ts      landing page at / (connection details, live catalog state)
@@ -99,11 +100,22 @@ src/cli.ts       entry point
 
 Each Snowflake **database** becomes its own DuckDB catalog:
 
-```
-Snowflake                 DuckDB
-  SNOWTEST.PUBLIC.T  ──►  ATTACH ':memory:' AS "SNOWTEST"
-                          "SNOWTEST"."PUBLIC"."T"
-```
+| Snowflake | DuckDB, in memory (default) | DuckDB, `SNOWTEST_DATA_DIR` set |
+|---|---|---|
+| database `SNOWTEST` | `ATTACH ':memory:' AS "SNOWTEST"` | `ATTACH '<dir>/SNOWTEST.duckdb' AS "SNOWTEST"` |
+| `SNOWTEST.PUBLIC.T` | `"SNOWTEST"."PUBLIC"."T"` | same |
+| stage definitions | catalog only | catalog + `<dir>/stages.json` |
+
+With a data directory, startup reattaches every `*.duckdb` file, adds its
+schemas to the catalog from `duckdb_schemas()`, and restores stages from
+`stages.json`. `DROP DATABASE` deletes the file; `DROP DATABASE` / `DROP SCHEMA`
+also remove the stages inside (definition, directory, `stages.json`), so every
+persisted stage always has a schema to come back to; `/_snowtest/reset` deletes
+all of them. Warehouses and roles are not persisted: they come from configuration.
+
+Names are folded once, where SQL text or configuration enters (`normalizeName`);
+the catalog, engine, stage store and file names use that canonical key as is, so
+`"mydb"` stays `mydb` (`mydb.duckdb`) across a restart.
 
 This is why no identifier rewriting is needed for three-part names, and why
 `USE DATABASE` / `USE SCHEMA` can be per-session (`USE "DB"."SCHEMA"` on a
@@ -122,7 +134,7 @@ catalog. They are read back from `duckdb_tables()`, `duckdb_views()` and
 ```mermaid
 sequenceDiagram
   autonumber
-  participant M as dbt-snowflake
+  participant M as dbt
   participant CF as connector
   participant S as snowtest
   participant E as DuckDB
@@ -167,6 +179,8 @@ flowchart TD
   VERB -->|LIST / REMOVE| STG["stage directory operations"]
   VERB -->|SHOW / DESCRIBE| META["synthesise Snowflake metadata"]
   VERB -->|USE / ALTER SESSION| CTX["mutate session state"]
+  VERB -->|"CREATE TABLE t (cols) AS"| CTAS["stage query, create, INSERT<br/>one transaction"]
+  VERB -->|"ALTER TABLE cluster / rename / swap"| ALT["no-op, or move tables<br/>one transaction per database"]
   VERB -->|CREATE / DROP / ALTER / COMMENT| DDL["catalog + DuckDB"]
   VERB -->|INSERT OVERWRITE| OW["DELETE then INSERT"]
   VERB -->|BEGIN / COMMIT / ROLLBACK| TX["accepted as no-ops"]
@@ -231,28 +245,45 @@ authorisation — every session can read every table.
 
 DuckDB already speaks a large subset of Snowflake, so the layer is deliberately
 narrow and never guesses: anything untranslatable passes through and fails with
-an honest Snowflake-shaped error rather than returning wrong data.
+an honest Snowflake-shaped error, and syntax it recognises but cannot emulate
+(an unknown format element, a number format model, an odd clock precision)
+fails with `… is not supported on snowtest` (`002003`, SQLSTATE `0A000`).
 
 | Category | Examples |
 |---|---|
-| Session context | `CURRENT_DATABASE()`, `CURRENT_SCHEMA()`, `CURRENT_ROLE()`, `CURRENT_USER()`, `CURRENT_WAREHOUSE()`, `CURRENT_ACCOUNT()`, `CURRENT_VERSION()` |
-| Functions | `IFF`, `NVL`, `NVL2`, `ZEROIFNULL`, `NULLIFZERO`, `DIV0`, `EQUAL_NULL`, `DECODE`, `SQUARE`, `GETDATE`, `SYSDATE` |
-| Aggregates | `LISTAGG … WITHIN GROUP (ORDER BY …)`, `BOOL_OR/BOOL_AND` aliases |
-| Dates | `DATEADD`, `DATEDIFF`, `TO_DATE`, `TO_TIMESTAMP*`, `TRY_TO_TIMESTAMP` |
-| Casts | `TO_VARCHAR`, `TO_NUMBER`, `TO_BOOLEAN`, `::string`, `::number`, `::variant` |
+| Session context | `CURRENT_DATABASE()`, `CURRENT_SCHEMA()`, `CURRENT_ROLE()`, `CURRENT_USER()`, `CURRENT_WAREHOUSE()`, `CURRENT_ACCOUNT()`, `CURRENT_VERSION()`; NULL with no current database/schema |
+| Clock | `CURRENT_TIMESTAMP[(p)]`, `LOCALTIMESTAMP[(p)]`, `CURRENT_TIME[(p)]`, `LOCALTIME`, `CURRENT_DATE()`, `SYSDATE()` (UTC, NTZ), `GETDATE()` |
+| Functions | `IFF`, `NVL`, `NVL2`, `ZEROIFNULL`, `NULLIFZERO`, `DIV0`, `EQUAL_NULL`, `DECODE` (`IS NOT DISTINCT FROM`), `SQUARE` |
+| Aggregates | `LISTAGG`/`ARRAY_AGG … WITHIN GROUP (ORDER BY …)` → ordering moved inside the call; `ARRAY_AGG` → `COALESCE(array_agg(x) FILTER (WHERE x IS NOT NULL), [])`; `BOOL_OR/BOOL_AND` aliases |
+| Dates | `DATEADD`, `DATEDIFF`, `TO_DATE`, `TO_TIMESTAMP*` with format → `strptime` (`FF`/`FF9` → `%n`, `FF6` → `%f`, `FF3` → `%g`), `TO_TIMESTAMP(n, scale)` |
+| Casts | `TO_VARCHAR` with format → `strftime`; `TO_NUMBER`, `TO_DOUBLE`, `TO_BOOLEAN`, `TO_BINARY`; every `TRY_` variant → `TRY_CAST`; `::string`, `::number`, `::variant` |
 | Semi-structured | `payload:path`, `payload:path::string`, `ARRAY_CONSTRUCT`, `OBJECT_CONSTRUCT`, `PARSE_JSON`, `TO_JSON` |
-| Types | `NUMBER(p,s)`, `VARIANT`, `OBJECT`, `ARRAY`, `TIMESTAMP_NTZ/LTZ/TZ`, `BINARY`, `VARCHAR(16777216)` |
+| Types | `NUMBER[(p[,s])]`, `DECIMAL`/`NUMERIC` without scale → `DECIMAL(38,0)`, `VARIANT`, `OBJECT`, `ARRAY`, `STRING`, `FLOAT`, `TIMESTAMP_NTZ/LTZ/TZ`, `BINARY`, `VARCHAR(16777216)` — only in type positions: `::`, `CAST(… AS …)`, column definitions of `CREATE TABLE` and `ALTER TABLE … ADD | … TYPE` |
+| String literals | Snowflake backslash escapes decoded (`\'`, `\\`, `\n`, `\t`, `\xhh`, `\uhhhh`, octal) and re-emitted as a DuckDB literal; NUL refused |
 | DDL decoration | `TRANSIENT`, `CLUSTER BY`, `COPY GRANTS`, `DATA_RETENTION_TIME_IN_DAYS`, `CHANGE_TRACKING` |
+
+Statements the router handles before translation (`src/meta.ts`):
+
+| Statement | Handling |
+|---|---|
+| `CREATE TABLE t (col type [NOT NULL] …) AS SELECT` | split by `splitColumnListCtas`: query into a temp table first (a self-reference reads the old rows), typed `CREATE` (PK/UNIQUE/FK dropped), then `INSERT` from the temp table, in one transaction |
+| `ALTER TABLE t CLUSTER BY …` / `DROP CLUSTERING KEY` / `SUSPEND`/`RESUME RECLUSTER` | existence check, then a no-op |
+| `ALTER TABLE t RENAME TO [db.][schema.]u` | DuckDB rename within a schema; across schemas, copy columns (type, NOT NULL) and rows, then drop, in one transaction; across databases (one written database per DuckDB transaction) commit a row-count-verified copy, then drop the source, removing the copy if that fails |
+| `ALTER TABLE t SWAP WITH u` | three moves through a parked name, in one transaction; across databases refused (`not supported on snowtest`) |
+| `DROP DATABASE` / `DROP SCHEMA` | missing object → `002003` unless `IF EXISTS`; schema `CASCADE` by default, `RESTRICT` honoured; stages inside removed; the session's current database/schema becomes NULL if dropped |
 
 Three rules exist because of concrete client failures, not tidiness:
 
-1. **String literals and comments are masked** before rewriting, so
-   `'IFF(a,b,c)'` inside a literal is never translated.
-2. **Unquoted identifiers fold to upper case.** DuckDB is case-insensitive but
-   case-*preserving*; Snowflake folds. dbt reads object names back from
-   `SHOW TERSE OBJECTS` and matches them exactly, so a lower-case `stg_orders`
-   in DuckDB against an upper-case `STG_ORDERS` lookup is only an "approximate
-   match" — and dbt refuses to proceed.
+1. **String literals, comments and quoted identifiers are masked** before
+   rewriting, so `'IFF(a,b,c)'` inside a literal and a column named
+   `"number"` or `"current_schema"` are never translated.
+2. **Every unquoted identifier folds to upper case** — tables, columns,
+   aliases (keywords and function names too, which DuckDB does not mind).
+   DuckDB is case-insensitive but case-*preserving*, and reports names as
+   stored; Snowflake folds. dbt matches relation names from `SHOW TERSE
+   OBJECTS` exactly and reads column names from `DESCRIBE`, so a lower-case
+   name is an "approximate match" dbt refuses. Quoted identifiers and variant
+   path keys keep their case.
 3. **`MERGE … INSERT VALUES (col, …)` gets qualified with the source alias.**
    Snowflake resolves those against the source; DuckDB calls it ambiguous.
 
@@ -273,10 +304,11 @@ Snowflake's JSON result format is not JSON-native. Clients decode values using
 | `date` | `"19737"` | epoch **days** |
 | `time` | `"3600.000000000"` | fractional seconds since midnight |
 | `timestamp_ntz` | `"1705314600.000000000"` | fractional epoch |
-| `timestamp_ltz/tz` | `"1705314600.000000000 1440"` | epoch **plus display offset**; the connector splits on the space and fails the whole result set if the second part is missing |
+| `timestamp_ltz/tz` | `"1705314600.000000000 1440"` | epoch **plus display offset**; the connector splits on the space and fails the whole result set if the second part is missing; always `1440` (UTC), as DuckDB's `TimeZone` is pinned to UTC |
 | `variant` | JSON text | `json_extract_string` for `:field::string` so quotes are stripped |
 
-The SQL API v2 uses a *different* encoder (human-readable formatted values), so
+The SQL API v2 uses a *different* encoder (human-readable formatted values,
+except `time`, which keeps the spec's seconds form), so
 the two surfaces share the `Outcome` but not the spelling. Getting this wrong is
 invisible in SQL and loud in Python — `assert rows[0][3] is True` returning
 `False` is exactly how the boolean rule was found.
@@ -331,8 +363,13 @@ Consequences, stated plainly:
 
 ## 10. dbt compatibility
 
-Supported and verified: `dbt debug`, `dbt run` (view, table, incremental),
-`dbt seed`, `dbt test`.
+Supported and verified (dbt 1.12.6): `dbt debug`,
+`dbt seed`, `dbt run` (view; table with `transient`, `copy_grants`,
+`cluster_by`, `automatic_clustering`; incremental `merge`, `delete+insert`,
+`append`; `contract: enforced`), `dbt snapshot` (`timestamp` and `check`),
+`dbt test`, `dbt source freshness`, `dbt docs generate`, `dbt run-operation`.
+Not supported: dynamic tables, materialized views, Python models, clone,
+Iceberg, `grants:`.
 
 Non-obvious requirements, all discovered by running dbt rather than reading
 about it:
@@ -345,6 +382,11 @@ about it:
 | `DESCRIBE TABLE …` | from `duckdb_columns()`, Snowflake type names |
 | `CREATE OR REPLACE VIEW` on an existing view | replaced in place; the failure seen here was dbt's case-sensitive cache lookup, fixed by folding identifiers |
 | `CREATE OR REPLACE TRANSIENT TABLE … AS` | `TRANSIENT` stripped |
+| `cluster_by` → `ALTER TABLE … CLUSTER BY (…)`, `RESUME RECLUSTER` | accepted as no-ops |
+| `contract: enforced` → `CREATE TABLE t (cols) AS (SELECT …)` | typed create + insert; NOT NULL enforced |
+| snapshots / freshness → `to_timestamp_ntz(convert_timezone('UTC', current_timestamp()))` | `CURRENT_TIMESTAMP()` call form translated |
+| catalog → `to_varchar(…, 'yyyy-mm-dd HH24:MI'\|\|'UTC')` | literal concatenation folded; `UTC` copied through |
+| `DESCRIBE TABLE` column names drive `MERGE` / snapshot column lists | upper case, NOT NULL reported |
 | second `dbt run` → `MERGE … USING …` | insert values qualified with the source alias |
 | `dbt seed` → `INSERT OVERWRITE INTO … VALUES (…)` | `DELETE` + `INSERT`, batched bindings inlined |
 | a `/* {...} */` comment on every statement | stripped before routing |
@@ -361,7 +403,7 @@ it depends on:
 
 ```mermaid
 flowchart LR
-  A["npm test<br/>vitest"] --> A1["dialect unit rules"]
+  A["npm test<br/>vitest"] --> A1["dialect rules, engine behaviour,<br/>persistence, config, pages"]
   B["npm run test:py"] --> B1["connector 4.8 / 5.1<br/>handshake, types, errors"]
   C["npm run test:dbt"] --> C1["dbt 1.12 + key-pair<br/>debug, run x2, seed x2, test"]
   C --> C2["verify.py<br/>results + wrong-key rejection"]
@@ -370,7 +412,7 @@ flowchart LR
 
 | Suite | Proves |
 |---|---|
-| `npm test` | translation rules in isolation |
+| `npm test` | translation rules in isolation, plus each rule run against DuckDB through the SQL API (contracts, rename/swap, conversions, column case, restart persistence, reset) |
 | `npm run test:py` | login, DDL/DML, Python type fidelity, `DESCRIBE`, `SHOW`, variant access, binds, error codes, SQL API v2 async, isolation, reconnect |
 | `npm run test:dbt` | a real transformation tool runs end to end over key-pair auth, including a second run (merge) and a second seed (overwrite must not duplicate) |
 
@@ -385,7 +427,10 @@ That produced two convincing but false failures during development.
 
 - **Not a security boundary.** Permissive by default; even in verified mode
   there is no user, role or privilege model, and no TLS.
-- In-memory engine: data lives for the process lifetime.
+- In memory by default: data lives for the process lifetime unless
+  `SNOWTEST_DATA_DIR` is set (`setup.py` and `compose.yaml` set it).
+- Several `;`-separated statements in one request are not split: DuckDB runs
+  them all and returns one result; routing follows the first statement.
 - Connector `execute_async` + `get_results_from_sfqid` is not implemented. The
   SQL API v2 async path (`?async=true`, then `GET /api/v2/statements/{handle}`)
   is, and is tested.

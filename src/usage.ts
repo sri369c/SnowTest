@@ -40,10 +40,11 @@ const TROUBLESHOOTING: Array<[string, string]> = [
   ['`390100` … malformed token', 'The private key does not match the configured public key. Regenerate the pair.'],
   ['`390100` … incorrect username or password', 'The login name is not in `SNOWTEST_USERS`. Add it, or unset the variable.'],
   ['`002003` … object does not exist', 'Wrong schema, or an unqualified name resolving elsewhere. Qualify `DB.SCHEMA.TABLE`.'],
+  ['`090105` / `090106` … does not have a current database / schema', 'The session’s current database or schema was dropped. `USE DATABASE` / `USE SCHEMA`, or qualify the name.'],
   ['`PUT` or `COPY INTO` fails on paths', 'Client and server must see the same absolute path. Share the stage directory.'],
-  ['A client in another container cannot connect', 'It resolved `127.0.0.1` to itself. Use `host: snowtest` on `snowtest-network`.'],
+  ['A client in another container cannot connect', 'It resolved `127.0.0.1` to itself. Use the container name (`host: snowtest`) on the same network.'],
   ['The client refuses plain HTTP', 'There is no TLS. Set `protocol: http`, or terminate TLS in a proxy.'],
-  ['Data is gone after a restart', 'The engine is in memory. Recreate the fixtures, or keep the process running.'],
+  ['Data is gone after a restart', 'The server ran in memory. Set `SNOWTEST_DATA_DIR`; `./setup.py up` does unless `--no-persist`.'],
   ['`COPY INTO` loads more rows than expected', 'An earlier file is still on the stage. `REMOVE @stage` first, or use a fresh stage root.'],
   ['`execute_async` returns no rows', 'Connector async polling is not implemented. Use the SQL API with `async=true`.'],
   ['Podman: permission denied on the mount', 'Rootless mapping or a missing SELinux label. `./setup.py up` sets both.'],
@@ -113,17 +114,19 @@ arguments. The same image runs under Docker.</p>
   </thead>
   <tbody>
       <tr><td><code>./setup.py up</code></td><td>Build if needed, start, wait until healthy, load the example tables, print a dbt profile.</td></tr>
-      <tr><td><code>./setup.py redeploy</code></td><td>Down, reset staged files, rebuild, up. Use it after a code change.</td></tr>
+      <tr><td><code>./setup.py redeploy</code></td><td>Down, clear staged files, rebuild, up. The data volume is kept. Use it after a code change.</td></tr>
       <tr><td><code>./setup.py status</code></td><td>Container state and the health endpoint.</td></tr>
       <tr><td><code>./setup.py logs</code></td><td>Server log, for a container that will not start.</td></tr>
-      <tr><td><code>./setup.py reset</code></td><td>Drop all data and recreate the catalog.</td></tr>
-      <tr><td><code>./setup.py down</code></td><td>Stop and remove the container.</td></tr>
+      <tr><td><code>./setup.py reset</code></td><td>Drop all data, persisted files included, and recreate the catalog.</td></tr>
+      <tr><td><code>./setup.py down</code></td><td>Stop and remove the container; the data volume and stage directory stay.</td></tr>
   </tbody>
 </table>
-<p class="muted">Worth knowing: <code>--port</code>, <code>--public-key</code>,
+<p class="muted">Worth knowing: <code>--name</code> (default <code>snowtest</code>; also names the
+<code>&lt;name&gt;-data</code> volume and the <code>.snowtest/&lt;name&gt;/stages</code> directory),
+<code>--port</code>, <code>--network</code>, <code>--no-persist</code>, <code>--public-key</code>,
 <code>--users</code>, <code>--env KEY=VALUE</code>, <code>--no-seed-examples</code>,
-<code>--recreate</code>, <code>--write-profile DIR</code>. The full list is
-<code>./setup.py up --help</code>.</p>
+<code>--recreate</code>, <code>--write-profile DIR</code>. Invalid names and ports are refused.
+The full list is <code>./setup.py up --help</code>.</p>
 
 <h2 id="control-plane">Control plane</h2>
 <table>
@@ -134,7 +137,7 @@ arguments. The same image runs under Docker.</p>
       <tr><td><code>GET /_snowtest/health</code></td><td>Liveness, plus both versions: the emulated Snowflake release and snowtest's own.</td></tr>
       <tr><td><code>GET /_snowtest/state</code></td><td>Databases, schemas, warehouses, roles, stages and the session count.</td></tr>
       <tr><td><code>POST /_snowtest/seed</code></td><td>Run a SQL script sent as <code>{"sql": "…"}</code>; statements split on <code>;</code>.</td></tr>
-      <tr><td><code>POST /_snowtest/reset</code></td><td>Drop everything and recreate the configured catalog.</td></tr>
+      <tr><td><code>POST /_snowtest/reset</code></td><td>Drop everything, persisted database files included, and recreate the configured catalog.</td></tr>
   </tbody>
 </table>
 <pre><code>curl -s -X POST 'http://localhost:3030/_snowtest/seed' \\
@@ -147,8 +150,10 @@ arguments. The same image runs under Docker.</p>
   itself: the connector is handed a <code>file://</code> path instead of a presigned
   URL. That is what makes <code>PUT</code> and <code>GET</code> work with no object
   storage, and it is also the requirement people trip over — <strong>client and server
-  must see the same absolute path</strong>. In a container, mount the stage root on
-  both sides; <code>setup.py</code> and <code>compose.yaml</code> already do it.
+  must see the same absolute path</strong>. <code>setup.py</code> bind-mounts a host directory
+  at the same path inside the container, so a client on the host works.
+  <code>compose.yaml</code> uses the <code>snowtest-stages</code> named volume instead, which only
+  a client in another container can reach, by mounting that volume at the same path.
 </p>
 <pre><code>PUT file:///srv/data/orders.csv @MY_STAGE
 COPY INTO ORDERS FROM @MY_STAGE FILE_FORMAT = (TYPE = CSV SKIP_HEADER = 1)

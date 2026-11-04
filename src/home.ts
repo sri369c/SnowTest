@@ -31,8 +31,8 @@ export interface HomeDatabaseState {
 
 export interface HomeSessionState {
   user: string;
-  database: string;
-  schema: string;
+  database: string | null;
+  schema: string | null;
   role: string;
 }
 
@@ -64,6 +64,9 @@ export function renderHome(
     config.users.length > 0
       ? `, login names limited to ${escapeHtml(config.users.join(', '))}`
       : '';
+  const storageLine = config.dataDir
+    ? `DuckDB files under <code>${escapeHtml(config.dataDir)}</code> — data survives a restart`
+    : 'in memory — a restart is a clean slate';
 
   const objectCount = state.databases.reduce(
     (total, db) =>
@@ -83,7 +86,7 @@ export function renderHome(
     state.sessions
       .map(
         (session) =>
-          `    <tr><td><code>${escapeHtml(session.user)}</code></td><td><code>${escapeHtml(session.database)}.${escapeHtml(session.schema)}</code></td><td>${escapeHtml(session.role)}</td></tr>`,
+          `    <tr><td><code>${escapeHtml(session.user)}</code></td><td><code>${escapeHtml(session.database ?? 'NULL')}.${escapeHtml(session.schema ?? 'NULL')}</code></td><td>${escapeHtml(session.role)}</td></tr>`,
       )
       .join('\n') || '    <tr><td colspan="3">No active sessions.</td></tr>';
   const surfaceRows = LANDING_SURFACES.map(
@@ -105,6 +108,7 @@ export function renderHome(
     <tr><th>Account</th><td><code>${account}</code></td></tr>
     <tr><th>Default context</th><td><code>${database}.${schema}</code> &middot; warehouse <code>${warehouse}</code></td></tr>
     <tr><th>Auth</th><td>${authLine}${usersLine}</td></tr>
+    <tr><th>Storage</th><td>${storageLine}</td></tr>
   </table>
 </div>
 
@@ -140,7 +144,7 @@ print(cur.fetchall())</code></pre>
 
 <h2>Connect with dbt</h2>
 <p>Key-pair auth is the normal way a service account reaches Snowflake, so it is the
-normal way to reach this too. Add these keys to any dbt-snowflake profile:</p>
+normal way to reach this too. Add these keys to any dbt profile:</p>
 <pre><code>snowtest:
   target: dev
   outputs:
@@ -186,7 +190,7 @@ ${surfaceRows}
   <tr><th><code>GET /_snowtest/health</code></th><td>liveness probe</td></tr>
   <tr><th><code>GET /_snowtest/state</code></th><td>databases, schemas, warehouses, roles, stages, sessions</td></tr>
   <tr><th><code>POST /_snowtest/seed</code></th><td>run a SQL script: <code>{"sql": "..."}</code></td></tr>
-  <tr><th><code>POST /_snowtest/reset</code></th><td>drop everything and recreate the configured catalog</td></tr>
+  <tr><th><code>POST /_snowtest/reset</code></th><td>drop everything, persisted files included, and recreate the configured catalog</td></tr>
 </table>
 
 <h2>What it is not</h2>
@@ -198,7 +202,7 @@ ${surfaceRows}
 <ul>
   <li>Nothing here authenticates or authorises unless you configure a public key.</li>
   <li>Never expose it publicly or point real credentials at it.</li>
-  <li>Data lives in memory and a temp stage directory; a restart is a clean slate.</li>
+  <li>Data lives in memory unless <code>SNOWTEST_DATA_DIR</code> is set (<code>setup.py</code> and <code>compose.yaml</code> set it).</li>
 </ul>
 
 <footer>

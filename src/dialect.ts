@@ -11,14 +11,17 @@
  *
  * Anything this layer cannot translate is emitted unchanged, so the failure
  * surfaces as an honest DuckDB syntax error through `mapEngineError` rather
- * than as silently wrong data.
+ * than as silently wrong data. Recognised syntax that cannot be emulated
+ * faithfully (an unknown format element, say) raises `unsupported()`.
  */
 
 import { normalizeName } from './catalog.js';
+import { compilationError, noCurrentContext, unsupported } from './errors.js';
 
 export interface RewriteContext {
-  database: string;
-  schema: string;
+  /** null when the session has no current database/schema. */
+  database: string | null;
+  schema: string | null;
   role: string;
   user: string;
   warehouse: string;
@@ -30,18 +33,41 @@ export interface RewriteContext {
 
 /** Placeholder marker for text we must not touch (string literals, comments). */
 const MARK = '\u0001';
+/** Placeholder marker for double-quoted identifiers. */
+const IDENT = '\u0002';
+const MARKED = /([\u0001\u0002])(\d+)\1/g;
 
-function pushOpaque(parts: string[], value: string): string {
+function pushOpaque(parts: string[], value: string, marker = MARK): string {
   parts.push(value);
-  return `${MARK}${parts.length - 1}${MARK}`;
+  return `${marker}${parts.length - 1}${marker}`;
+}
+
+/** One Snowflake backslash escape at `sql[at]`; returns the character and the width consumed. */
+function readEscape(sql: string, at: number): [string, number] {
+  const rest = sql.slice(at + 1);
+  let decoded: string;
+  let width: number;
+  const octal = /^[0-7]{3}/.exec(rest);
+  const hex = /^x([0-9A-Fa-f]{2})/.exec(rest);
+  const unicode = /^u([0-9A-Fa-f]{4})/.exec(rest);
+  if (octal) [decoded, width] = [String.fromCharCode(Number.parseInt(octal[0], 8)), 4];
+  else if (hex) [decoded, width] = [String.fromCharCode(Number.parseInt(hex[1], 16)), 4];
+  else if (unicode) [decoded, width] = [String.fromCharCode(Number.parseInt(unicode[1], 16)), 6];
+  else {
+    const simple: Record<string, string> = { b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', 0: '\0' };
+    [decoded, width] = [simple[rest[0]] ?? rest[0], 2];
+  }
+  // DuckDB's parser ends a query at a raw NUL.
+  if (decoded === '\0') throw unsupported('A NUL character in a string literal');
+  return [decoded, width];
 }
 
 /**
  * Replace string literals and comments with opaque markers so the rewrite
- * rules never fire inside them. Double-quoted identifiers stay visible because
- * they are code (and `col:"Field"` is a legitimate variant path).
+ * rules never fire inside them. With `decode`, a literal is stored as the
+ * DuckDB literal of its Snowflake value (backslash escapes applied).
  */
-function maskNonCode(sql: string, parts: string[]): string {
+function maskNonCode(sql: string, parts: string[], decode = false): string {
   let out = '';
   let i = 0;
 
@@ -50,22 +76,30 @@ function maskNonCode(sql: string, parts: string[]): string {
 
     if (ch === "'") {
       let j = i + 1;
-      let text = "'";
+      let value = '';
+      let closed = false;
       while (j < sql.length) {
+        if (sql[j] === '\\' && j + 1 < sql.length) {
+          const [decoded, width] = readEscape(sql, j);
+          value += decoded;
+          j += width;
+          continue;
+        }
         if (sql[j] === "'") {
           if (sql[j + 1] === "'") {
-            text += "''";
+            value += "'";
             j += 2;
             continue;
           }
-          text += "'";
+          closed = true;
           j += 1;
           break;
         }
-        text += sql[j];
+        value += sql[j];
         j += 1;
       }
-      out += pushOpaque(parts, text);
+      // An unterminated literal goes through verbatim, for DuckDB to reject.
+      out += pushOpaque(parts, decode && closed ? `'${value.replace(/'/g, "''")}'` : sql.slice(i, j));
       i = j;
       continue;
     }
@@ -124,13 +158,17 @@ function maskNonCode(sql: string, parts: string[]): string {
 }
 
 function unmask(sql: string, parts: string[]): string {
-  if (!sql.includes(MARK)) return sql;
-  return sql.replace(/\u0001(\d+)\u0001/g, (_m, idx: string) => parts[Number(idx)] ?? '');
+  return sql.replace(MARKED, (_m, _marker: string, idx: string) => parts[Number(idx)] ?? '');
 }
 
 /** Resolve opaque markers inside a fragment back to their original text. */
 function resolve(arg: string, parts: string[]): string {
-  return arg.replace(/\u0001(\d+)\u0001/g, (_m, idx: string) => parts[Number(idx)] ?? '');
+  return unmask(arg, parts);
+}
+
+/** Mask double-quoted identifiers so name-based rules (types, clocks, session values) skip them. */
+function maskIdentifiers(sql: string, parts: string[]): string {
+  return sql.replace(/"(?:[^"]|"")*"/g, (identifier) => pushOpaque(parts, identifier, IDENT));
 }
 
 function matchParen(sql: string, openIndex: number): number {
@@ -262,18 +300,56 @@ function intervalUnit(unit: string): string | null {
   }
 }
 
-/** Strip Snowflake's `WITHIN GROUP (ORDER BY ...)` from aggregates. */
-function stripWithinGroup(sql: string): string {
-  let result = sql;
-  for (let guard = 0; guard < 100; guard += 1) {
-    const match = /\bWITHIN\s+GROUP\s*\(/i.exec(result);
-    if (!match) break;
-    const openIndex = match.index + match[0].length - 1;
-    const closeIndex = matchParen(result, openIndex);
-    if (closeIndex === -1) break;
-    result = result.slice(0, match.index) + result.slice(closeIndex + 1);
+/** `name(args) [WITHIN GROUP (ORDER BY ...)] [OVER (...)]`, re-rendered with the ordering and window clause. */
+function rewriteOrderedAggregate(
+  sql: string,
+  name: string,
+  build: (args: string[]) => string[] | null,
+  render: (args: string[], order: string, over: string) => string,
+): string {
+  const pattern = new RegExp(`(^|[^A-Za-z0-9_$])${name}\\s*\\(`, 'i');
+  let out = '';
+  let rest = sql;
+  for (;;) {
+    const match = pattern.exec(rest);
+    if (!match) return out + rest;
+    const open = match.index + match[0].length - 1;
+    const close = matchParen(rest, open);
+    if (close === -1) return out + rest;
+
+    const args = build(
+      splitTopLevel(rest.slice(open + 1, close)).map((arg) =>
+        rewriteOrderedAggregate(arg, name, build, render),
+      ),
+    );
+    if (args === null) {
+      out += rest.slice(0, open + 1);
+      rest = rest.slice(open + 1);
+      continue;
+    }
+
+    let end = close + 1;
+    let order = '';
+    const within = /^\s*WITHIN\s+GROUP\s*\(/i.exec(rest.slice(end));
+    if (within) {
+      const withinOpen = end + within[0].length - 1;
+      const withinClose = matchParen(rest, withinOpen);
+      if (withinClose === -1) return out + rest;
+      order = ` ${rest.slice(withinOpen + 1, withinClose).trim()}`;
+      end = withinClose + 1;
+    }
+    let over = '';
+    const window = /^\s*OVER\s*\(/i.exec(rest.slice(end));
+    if (window) {
+      const overClose = matchParen(rest, end + window[0].length - 1);
+      if (overClose === -1) return out + rest;
+      over = ` ${rest.slice(end, overClose + 1).trim()}`;
+      end = overClose + 1;
+    }
+
+    out += `${rest.slice(0, match.index)}${match[1]}${render(args, order, over)}`;
+    rest = rest.slice(end);
   }
-  return result;
 }
 
 const SIMPLE_RENAMES: Array<[RegExp, string]> = [
@@ -282,14 +358,25 @@ const SIMPLE_RENAMES: Array<[RegExp, string]> = [
   [/\bBOOLAND_AGG\s*\(/gi, 'BOOL_AND('],
   [/\bLEAST\s*\(/gi, 'LEAST('],
   [/\bGETDATE\s*\(/gi, 'NOW('],
-  [/\bSYSDATE\s*\(/gi, 'NOW('],
 ];
+
+/** Remove every `CLUSTER BY (...)`, nested parentheses included. */
+function stripClusterBy(sql: string): string {
+  let out = sql;
+  for (;;) {
+    const match = /\bCLUSTER\s+BY\s*\(/i.exec(out);
+    if (!match) return out;
+    const close = matchParen(out, match.index + match[0].length - 1);
+    if (close === -1) return out;
+    out = out.slice(0, match.index) + out.slice(close + 1);
+  }
+}
 
 function ddlDecorations(sql: string): string {
   let out = sql;
   out = out.replace(/\bCREATE\s+OR\s+REPLACE\s+(TRANSIENT|TEMPORARY|VOLATILE)\s+/gi, 'CREATE OR REPLACE ');
   out = out.replace(/\bCREATE\s+(TRANSIENT|VOLATILE)\s+/gi, 'CREATE ');
-  out = out.replace(/\bCLUSTER\s+BY\s*\([^)]*\)/gi, '');
+  out = stripClusterBy(out);
   out = out.replace(/\bCOPY\s+GRANTS\b/gi, '');
   out = out.replace(/\bDATA_RETENTION_TIME_IN_DAYS\s*=\s*\d+\s*/gi, '');
   out = out.replace(/\bCHANGE_TRACKING\s*=\s*(TRUE|FALSE)\s*/gi, '');
@@ -298,41 +385,39 @@ function ddlDecorations(sql: string): string {
 }
 
 /**
- * Fold unquoted object names to upper case, the way Snowflake does.
- *
- * DuckDB is case-insensitive but case-*preserving*: `create view db.s.t` stores
- * `t` verbatim. Clients that read object names back (dbt caches them from
- * `SHOW TERSE OBJECTS` and then looks up `T`) only see an approximate match and
- * refuse to proceed, so the names have to be folded at creation time.
+ * Fold unquoted identifiers (and keywords, harmlessly) to upper case as Snowflake does.
+ * DuckDB reports names as stored, so this is what makes `select a` return `A`.
  */
-function foldIdentifierCase(sql: string): string {
-  const fold = (identifier: string): string =>
-    identifier
-      .split('.')
-      .map((part) => (part.startsWith('"') ? part : part.toUpperCase()))
-      .join('.');
-
-  const name = '([A-Za-z_][\\w$]*(?:\\.[A-Za-z_][\\w$]*)*)';
-
-  let out = sql.replace(
-    new RegExp(
-      `\\b(CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:TRANSIENT\\s+|TEMPORARY\\s+|TEMP\\s+)?(?:TABLE|VIEW)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?)${name}`,
-      'gi',
-    ),
-    (_match, prefix: string, target: string) => prefix + fold(target),
-  );
-
-  out = out.replace(
-    new RegExp(`\\b(DROP\\s+(?:TABLE|VIEW)\\s+(?:IF\\s+EXISTS\\s+)?)${name}`, 'gi'),
-    (_match, prefix: string, target: string) => prefix + fold(target),
-  );
-
-  out = out.replace(
-    new RegExp(`\\b(ALTER\\s+TABLE\\s+)${name}(\\s+RENAME\\s+TO\\s+)${name}`, 'gi'),
-    (_match, head: string, from: string, middle: string, to: string) =>
-      head + fold(from) + middle + fold(to),
-  );
-
+function foldUnquoted(sql: string): string {
+  let out = '';
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === MARK || ch === IDENT) {
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === ch && ch !== MARK && ch !== IDENT && sql[j + 1] === ch) {
+          j += 2;
+          continue;
+        }
+        if (sql[j] === ch) break;
+        j += 1;
+      }
+      out += sql.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    const word = /^[A-Za-z_][A-Za-z0-9_$]*|^[0-9][A-Za-z0-9_.]*/.exec(sql.slice(i, i + 256));
+    if (word) {
+      const folded = /^[0-9]/.test(word[0]) ? word[0] : word[0].toUpperCase();
+      // Type positions already became BLOB; a bare BINARY left is a column, which DuckDB only takes quoted.
+      out += folded === 'BINARY' ? '"BINARY"' : folded;
+      i += word[0].length;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
   return out;
 }
 
@@ -361,7 +446,7 @@ function qualifyMergeInsertValues(sql: string): string {
           if (/^[A-Za-z_][\w$]*$/.test(trimmed) && !KEYWORDS.has(trimmed.toUpperCase())) {
             return `${alias}.${trimmed}`;
           }
-          if (/^"[^"]+"$/.test(trimmed)) return `${alias}.${trimmed}`;
+          if (/^\u0002\d+\u0002$/.test(trimmed)) return `${alias}.${trimmed}`;
           return trimmed;
         })
         .join(', ');
@@ -394,14 +479,16 @@ const SNOWFLAKE_TABLE_COLUMNS =
  */
 function databaseInformationSchema(
   sql: string,
-  currentDatabase: string,
+  currentDatabase: string | null,
   literal: (value: string) => string,
 ): string {
   return sql.replace(
     /(?<![\w$".])(?:("[^"]+"|[A-Za-z_][\w$]*)\s*\.\s*)?(?:information_schema|"INFORMATION_SCHEMA")\s*\.\s*(columns|tables|views|schemata)\b/gi,
     (_match, database: string | undefined, view: string) => {
       const name = view.toLowerCase();
-      const catalog = toSqlLiteral(database ? normalizeName(database) : currentDatabase);
+      const target = database ? normalizeName(database) : currentDatabase;
+      if (target === null) throw noCurrentContext('database', 'SELECT');
+      const catalog = toSqlLiteral(target);
       const body =
         name === 'schemata'
           ? `SELECT * FROM information_schema.schemata WHERE catalog_name = ${catalog}`
@@ -418,31 +505,469 @@ function databaseInformationSchema(
   );
 }
 
-function columnTypes(sql: string): string {
+/** A Snowflake type and optional `(p[, s])` → DuckDB's spelling; unknown names unchanged. */
+function duckType(name: string, args = ''): string {
+  const params = args.replace(/\s+/g, '');
+  switch (name.toUpperCase()) {
+    case 'NUMBER': {
+      if (!params) return 'DECIMAL(38,0)';
+      const [precision, scale = '0'] = params.slice(1, -1).split(',');
+      return `DECIMAL(${precision},${scale})`;
+    }
+    // Snowflake DECIMAL/NUMERIC without precision is NUMBER(38,0); DuckDB's is (18,3).
+    case 'DECIMAL':
+    case 'NUMERIC':
+      return params ? `${name}${args}` : 'DECIMAL(38,0)';
+    case 'VARCHAR':
+      return params === '(16777216)' ? 'VARCHAR' : `${name}${args}`;
+    case 'STRING':
+    case 'TEXT':
+      return `VARCHAR${args}`;
+    case 'TIMESTAMP':
+    case 'DATETIME':
+    case 'TIMESTAMP_NTZ': {
+      // TIMESTAMP(9) is DuckDB's TIMESTAMP_NS; 7 and 8 would keep 9 digits.
+      const digits = fractionDigits(name, params);
+      if (digits === 7 || digits === 8) throw unsupported(`${name.toUpperCase()}(${digits})`);
+      return storedType(digits === 9 ? 'TIMESTAMP(9)' : 'TIMESTAMP', name, params);
+    }
+    case 'TIMESTAMP_LTZ':
+    case 'TIMESTAMP_TZ':
+      return storedType('TIMESTAMPTZ', name, params);
+    case 'BINARY':
+      return 'BLOB';
+    case 'VARIANT':
+    case 'OBJECT':
+    case 'ARRAY':
+      return 'JSON';
+    case 'FLOAT':
+      return 'DOUBLE';
+    case 'TIME':
+      return storedType('TIME', name, params);
+    default:
+      return `${name}${args}`;
+  }
+}
+
+/** `(n)` fractional-second digits of a date/time type; null when not given. */
+function fractionDigits(name: string, params: string): number | null {
+  if (!params) return null;
+  const digits = /^\((\d)\)$/.exec(params);
+  if (!digits) throw compilationError(`${name.toUpperCase()}${params}: precision must be between 0 and 9.`);
+  return Number(digits[1]);
+}
+
+/**
+ * Only column types get here below 6 digits (casts go through `precisionCast`). DuckDB TIME / TIMESTAMPTZ take
+ * no precision and TIMESTAMP(0|3) rounds on write, so such a column is refused rather than kept wrong.
+ */
+function storedType(duck: string, name: string, params: string): string {
+  const digits = fractionDigits(name, params);
+  if (digits !== null && digits < 6) {
+    throw unsupported(`A ${name.toUpperCase()}(${digits}) column (fewer than 6 fractional digits; casts work)`);
+  }
+  return duck;
+}
+
+const TYPE = String.raw`([A-Za-z_][A-Za-z0-9_]*)(\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?`;
+const NAME_PART = String.raw`(?:\u0002\d+\u0002|[A-Za-z_][\w$]*)`;
+const TABLE_REF = String.raw`${NAME_PART}(?:\s*\.\s*${NAME_PART})*`;
+
+type Literal = (value: string) => string;
+
+/**
+ * Snowflake `[TRY_]CAST(value AS TIME)`. DuckDB has no TIMESTAMPTZ → TIME cast, so every source goes via
+ * TIMETZ (wall clock); strptime then enforces [00:00, 24:00), which TIME parsing misses ('24:00:00') and
+ * TIMETZ parsing skips ('25:00'). The emitted TIME is masked so the cast rules do not see it again.
+ */
+function timeCast(value: string, tryCast: boolean, literal: Literal, digits: number): string {
+  const time = literal('TIME');
+  let wallClock = `CAST(CAST(${tryCast ? 'TRY_CAST' : 'CAST'}(${value} AS TIMETZ) AS ${time}) AS VARCHAR)`;
+  // The text is 'HH:MM:SS[.ffffff]': cutting it truncates to TIME(digits).
+  if (digits < 6) wallClock = `left(${wallClock}, ${digits === 0 ? 8 : 9 + digits})`;
+  const formats = literal("['%H:%M:%S.%f', '%H:%M:%S']");
+  return `CAST(${tryCast ? 'try_strptime' : 'strptime'}(${wallClock}, ${formats}) AS ${time})`;
+}
+
+/** Snowflake timestamp types whose casts below 6 digits are truncated with date_trunc, by DuckDB type. */
+const TIMESTAMP_TYPES = new Map([
+  ['TIMESTAMP', 'TIMESTAMP'],
+  ['DATETIME', 'TIMESTAMP'],
+  ['TIMESTAMP_NTZ', 'TIMESTAMP'],
+  ['TIMESTAMP_LTZ', 'TIMESTAMPTZ'],
+  ['TIMESTAMP_TZ', 'TIMESTAMPTZ'],
+]);
+
+/**
+ * `[TRY_]CAST(operand AS name args)` for TIME(n) and timestamps below 6 digits (DuckDB's TIMESTAMP(0|3)
+ * rounds; Snowflake truncates); null for every other type. `operand` is only read when a rewrite is due.
+ */
+function precisionCast(name: string, args: string | undefined, operand: () => string, tryCast: boolean, literal: Literal): string | null {
+  const type = name.toUpperCase();
+  const duck = TIMESTAMP_TYPES.get(type);
+  if (type !== 'TIME' && duck === undefined) return null;
+  const digits = fractionDigits(type, (args ?? '').replace(/\s+/g, ''));
+  if (type === 'TIME') return timeCast(operand(), tryCast, literal, digits ?? 9);
+  if (digits === null || digits >= 6) return null;
+  if (digits !== 0 && digits !== 3) throw unsupported(`${type}(${digits})`);
+  const unit = literal(digits === 0 ? "'second'" : "'millisecond'");
+  return `date_trunc(${unit}, ${tryCast ? 'TRY_CAST' : 'CAST'}(${operand()} AS ${duck}))`;
+}
+
+/** Index of the bracket opening the one closed at `close`. */
+function matchOpen(sql: string, close: number): number {
+  let depth = 0;
+  for (let i = close; i >= 0; i -= 1) {
+    if (sql[i] === ')' || sql[i] === ']') depth += 1;
+    else if (sql[i] === '(' || sql[i] === '[') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Keywords that may sit right before `(` without being a function name. */
+const NOT_A_CALL = new Set([
+  'SELECT', 'DISTINCT', 'ALL', 'FROM', 'JOIN', 'USING', 'WHERE', 'AND', 'OR', 'NOT', 'ON', 'CASE', 'WHEN', 'THEN',
+  'ELSE', 'IN', 'IS', 'LIKE', 'ILIKE', 'BETWEEN', 'AS', 'BY', 'HAVING', 'EXISTS', 'VALUES', 'UNION', 'INTERSECT',
+  'EXCEPT', 'MINUS', 'RETURN',
+]);
+/** Snowflake reserved words (bar NULL/TRUE/FALSE): never a variant source, so `LIMIT :n` is a named bind. */
+const RESERVED = new Set([
+  'ALL', 'ALTER', 'AND', 'ANY', 'AS', 'BETWEEN', 'BY', 'CASE', 'CAST', 'CHECK', 'COLUMN', 'CONNECT', 'CONSTRAINT',
+  'CREATE', 'CROSS', 'CURRENT', 'DELETE', 'DISTINCT', 'DROP', 'ELSE', 'EXISTS', 'FOLLOWING', 'FOR', 'FROM', 'FULL',
+  'GRANT', 'GROUP', 'HAVING', 'ILIKE', 'IN', 'INCREMENT', 'INNER', 'INSERT', 'INTERSECT', 'INTO', 'IS', 'JOIN',
+  'LATERAL', 'LEFT', 'LIKE', 'LIMIT', 'MINUS', 'NATURAL', 'NOT', 'OF', 'ON', 'OR', 'ORDER', 'QUALIFY', 'REGEXP',
+  'REVOKE', 'RIGHT', 'RLIKE', 'ROW', 'ROWS', 'SAMPLE', 'SELECT', 'SET', 'SOME', 'START', 'TABLE', 'TABLESAMPLE',
+  'THEN', 'TO', 'TRIGGER', 'TRY_CAST', 'UNION', 'UNIQUE', 'UPDATE', 'USING', 'VALUES', 'WHEN', 'WHENEVER', 'WHERE',
+  'WITH',
+]);
+/** `f(x) OVER (…)`, `f(x) FILTER (…)`, `f(x) WITHIN GROUP (…)`: the clause belongs to the call. */
+const CALL_CLAUSE = /\)\s*(?:OVER|FILTER|WITHIN\s+GROUP)\s*$/i;
+/** `TIMESTAMP '…'` is one literal. */
+const TYPED_LITERAL = /(?<![\w$.])(?:DATE|TIME|TIMESTAMP(?:_NTZ|_LTZ|_TZ)?)\s*$/i;
+
+/** Start of the primary expression ending at `end`: literal, name, call, parentheses, subscript or CASE … END. */
+function primaryStart(sql: string, end: number): number {
+  const ch = sql[end - 1];
+  if (ch === MARK || ch === IDENT) {
+    const start = sql.lastIndexOf(ch, end - 2);
+    const typed = ch === MARK ? TYPED_LITERAL.exec(sql.slice(0, start)) : null;
+    return typed ? typed.index : start;
+  }
+  if (ch === ')' || ch === ']') {
+    const open = matchOpen(sql, end - 1);
+    if (open <= 0) return open;
+    if (sql[open] === '[' && /[\w$)\]\u0001\u0002]/.test(sql[open - 1])) return primaryStart(sql, open);
+    const head = sql.slice(0, open).trimEnd();
+    const clause = CALL_CLAUSE.exec(head);
+    if (clause) return primaryStart(sql, clause.index + 1);
+    if (head.endsWith(IDENT)) return primaryStart(sql, head.length);
+    const name = /[A-Za-z_][\w$]*$/.exec(head);
+    return name && !NOT_A_CALL.has(name[0].toUpperCase()) ? name.index : open;
+  }
+  const word = /[\w$]+$/.exec(sql.slice(0, end))?.[0];
+  if (!word) return -1;
+  const start = end - word.length;
+  if (word.toUpperCase() !== 'END') return start;
+  let depth = 0;
+  for (const keyword of [...sql.slice(0, end).matchAll(/\b(?:CASE|END)\b/gi)].reverse()) {
+    depth += keyword[0].toUpperCase() === 'END' ? 1 : -1;
+    if (depth === 0) return keyword.index;
+  }
+  return -1;
+}
+
+/** Start of the operand of a postfix `::` cast at `end`: `a.b` chains, earlier casts and `v:path` steps included. */
+function castOperandStart(sql: string, end: number): number {
+  let i = sql.slice(0, end).trimEnd().length;
+  for (;;) {
+    i = primaryStart(sql, i);
+    if (i <= 0) return i;
+    if (sql[i - 1] === '.') {
+      i -= 1;
+      continue;
+    }
+    const before = sql.slice(0, i).trimEnd();
+    if (!before.endsWith(':')) return i;
+    i = before.slice(0, before.endsWith('::') ? -2 : -1).trimEnd().length;
+  }
+}
+
+const KEY = String.raw`(?:\u0002\d+\u0002|[A-Za-z_][\w$]*)`;
+
+/** JSON path of a variant step (`a.b[0]`, `"Quoted Key"`); keys keep their case. */
+function jsonPath(step: string, parts: string[]): string {
+  return `$${step.replace(/\[\d+\]|\.?(?:\u0002(\d+)\u0002|([A-Za-z_][\w$]*))/g, (token, ident?: string, name?: string) => {
+    if (name) return `.${name}`;
+    if (!ident) return token;
+    const key = parts[Number(ident)].slice(1, -1).replace(/""/g, '"');
+    if (key.includes('"')) throw unsupported('A variant key containing a double quote');
+    return `."${key}"`;
+  })}`;
+}
+
+/** `src:path` → `json_extract(src, '$.path')`; `src` is a name, quoted name or call (not a string: `{'k': v}`). */
+function variantPaths(sql: string, parts: string[], literal: Literal): string {
+  const step = new RegExp(String.raw`(?<!:)\s*:\s*(${KEY}(?:\.${KEY}|\[\d+\])*)`, 'g');
   let out = sql;
-  out = out.replace(/\bNUMBER\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)/gi, 'DECIMAL($1,$2)');
-  out = out.replace(/\bNUMBER\s*\(\s*(\d+)\s*\)/gi, 'DECIMAL($1,0)');
-  out = out.replace(/\bNUMBER\b(?!\s*\()/gi, 'DECIMAL(38,0)');
-  out = out.replace(/\bVARCHAR\s*\(\s*16777216\s*\)/gi, 'VARCHAR');
-  out = out.replace(/\bTIMESTAMP_NTZ\b/gi, 'TIMESTAMP');
-  out = out.replace(/\bTIMESTAMP_(LTZ|TZ)\b/gi, 'TIMESTAMPTZ');
-  out = out.replace(/\bBINARY\b/gi, 'BLOB');
-  out = out.replace(/\bSTRING\b/gi, 'VARCHAR');
-  out = out.replace(/\bVARIANT\b/gi, 'JSON');
+  for (let match = step.exec(out); match; match = step.exec(out)) {
+    const end = match.index;
+    let start = out[end - 1] === MARK ? -1 : primaryStart(out, end);
+    if (start >= 0 && out[start - 1] !== '.' && RESERVED.has(out.slice(start, end).toUpperCase())) {
+      throw unsupported(`Named bind variable ':${unmask(match[1], parts)}' (bind with ? or %s)`);
+    }
+    while (start > 0 && out[start - 1] === '.') start = primaryStart(out, start - 1);
+    if (start > 0 && /::\s*$/.test(out.slice(0, start))) {
+      throw unsupported(`A variant path after a :: cast (':${unmask(match[1], parts)}') (parenthesise the cast)`);
+    }
+    if (start < 0) continue;
+    const path = literal(toSqlLiteral(jsonPath(match[1], parts)));
+    const replacement = `json_extract(${out.slice(start, end)}, ${path})`;
+    out = out.slice(0, start) + replacement + out.slice(end + match[0].length);
+    step.lastIndex = start + replacement.length;
+  }
   return out;
 }
 
-function castAliases(sql: string): string {
+/** Index of the `json_extract(` call spanning `sql[start, end)`, outer parentheses allowed; -1 if none. */
+function jsonExtractAt(sql: string, start: number, end: number): number {
+  if (start < 0) return -1;
+  let s = start;
+  let e = end;
+  for (;;) {
+    while (s < e && /\s/.test(sql[s])) s += 1;
+    while (e > s && /\s/.test(sql[e - 1])) e -= 1;
+    if (sql[s] !== '(' || matchParen(sql, s) !== e - 1) break;
+    s += 1;
+    e -= 1;
+  }
+  return sql.startsWith('json_extract(', s) && matchParen(sql, s + 12) === e - 1 ? s : -1;
+}
+
+/**
+ * A variant path cast to VARCHAR reads through `json_extract_string`: Snowflake unquotes a JSON string
+ * and gives other values as JSON text, which `json_extract` + cast would keep quoted.
+ */
+function variantStringCasts(sql: string): string {
   let out = sql;
-  out = out.replace(/::\s*(string|text)\b/gi, '::VARCHAR');
-  out = out.replace(/::\s*number\b/gi, '::DOUBLE');
-  out = out.replace(/::\s*(variant|object|array)\b/gi, '::JSON');
-  out = out.replace(/::\s*timestamp_ntz\b/gi, '::TIMESTAMP');
-  out = out.replace(/::\s*timestamp_(ltz|tz)\b/gi, '::TIMESTAMPTZ');
-  out = out.replace(/::\s*binary\b/gi, '::BLOB');
-  out = out.replace(/::\s*float\b/gi, '::DOUBLE');
+  const rename = (at: number) => `${out.slice(0, at)}json_extract_string${out.slice(at + 12)}`;
+  const postfix = /::\s*VARCHAR\b/gi;
+  for (let match = postfix.exec(out); match; match = postfix.exec(out)) {
+    const operandEnd = out.slice(0, match.index).trimEnd().length;
+    if (/\[\s*\u0001\d+\u0001\s*\]$/.test(out.slice(0, operandEnd))) {
+      throw unsupported("Casting a bracket variant path (col['key']) to VARCHAR (write col:key::string)");
+    }
+    const at = jsonExtractAt(out, primaryStart(out, operandEnd), match.index);
+    if (at < 0) continue;
+    out = rename(at);
+    postfix.lastIndex = match.index + 7 + match[0].length;
+  }
+  const call = /\b(?:TRY_)?CAST\s*\(/gi;
+  for (let match = call.exec(out); match; match = call.exec(out)) {
+    const open = match.index + match[0].length - 1;
+    const close = matchParen(out, open);
+    const as = close < 0 ? null : /\s+AS\s+VARCHAR\b(?:\s*\(\s*\d+\s*\))?\s*$/i.exec(out.slice(open + 1, close));
+    const at = as ? jsonExtractAt(out, open + 1, open + 1 + as.index) : -1;
+    if (at >= 0) out = rename(at);
+    call.lastIndex = open + 1;
+  }
   return out;
 }
+
+/** `x::TIME[(p)]`, `x::TIMESTAMP_TZ(p)`, ... → `precisionCast`, leftmost first so an operand's own casts are already rewritten. */
+function postfixPrecisionCasts(sql: string, literal: Literal): string {
+  const cast = /::\s*(TIME|TIMESTAMP(?:_[LN]?TZ)?|DATETIME)\b(\s*\(\s*\d+\s*\))?/gi;
+  let out = sql;
+  for (let match = cast.exec(out); match; match = cast.exec(out)) {
+    const [text, name, args] = match;
+    const at = match.index;
+    let start = -1;
+    const rewritten = precisionCast(name, args, () => {
+      start = castOperandStart(out, at);
+      if (start < 0) throw unsupported(`This ::${name.toUpperCase()} operand; write CAST(... AS ${name.toUpperCase()})`);
+      return out.slice(start, at).trim();
+    }, false, literal);
+    if (rewritten === null) continue;
+    const head = out.slice(0, start);
+    // `distinct(x)::time`: keep the keyword apart from the emitted CAST.
+    const replacement = (/[\w$]$/.test(head) ? ' ' : '') + rewritten;
+    out = head + replacement + out.slice(at + text.length);
+    cast.lastIndex = start + replacement.length;
+  }
+  return out;
+}
+
+/** `x::type` and `[TRY_]CAST(x AS type)`: the only expression positions that name a type. */
+function castTypes(sql: string, literal: Literal): string {
+  return castCalls(
+    postfixPrecisionCasts(sql, literal).replace(
+      new RegExp(`::\\s*${TYPE}`, 'g'),
+      (_m, name: string, args?: string) => `::${duckType(name, args)}`,
+    ),
+    literal,
+  );
+}
+
+function castCalls(out: string, literal: Literal): string {
+  const call = /\b((?:TRY_)?CAST)\s*\(/gi;
+  let result = '';
+  let last = 0;
+  for (let match = call.exec(out); match; match = call.exec(out)) {
+    const open = match.index + match[0].length - 1;
+    const close = matchParen(out, open);
+    if (close === -1) break;
+    const inner = castCalls(out.slice(open + 1, close), literal);
+    const typed = new RegExp(`^([\\s\\S]*\\b)(AS\\s+)${TYPE}(\\s*)$`, 'i').exec(inner);
+    const rewritten = typed && precisionCast(typed[3], typed[4], () => typed[1].trim(), /^TRY_/i.test(match[1]), literal);
+    if (rewritten) {
+      result += out.slice(last, match.index) + rewritten;
+    } else {
+      const body = typed ? typed[1] + typed[2] + duckType(typed[3], typed[4]) + typed[5] : inner;
+      result += `${out.slice(last, open + 1)}${body})`;
+    }
+    last = close + 1;
+    call.lastIndex = last;
+  }
+  return result + out.slice(last);
+}
+
+/**
+ * `name TYPE ...` in a column definition list; constraints are left alone. With `timeCheck`
+ * (CREATE TABLE; ADD COLUMN cannot carry one) a TIME column refuses DuckDB's 24:00:00 on insert.
+ */
+function columnDefinitions(list: string, timeCheck: boolean): string {
+  return splitTopLevel(list)
+    .map((definition) =>
+      /^(?:constraint|primary|unique|foreign|check)\b/i.test(definition)
+        ? definition
+        : definition.replace(new RegExp(`^(${NAME_PART}\\s+)${TYPE}`), (_m, head: string, name: string, args?: string) => {
+            const type = duckType(name, args);
+            return timeCheck && type === 'TIME' ? `${head}TIME CHECK (hour(${head.trim()}) < 24)` : head + type;
+          }),
+    )
+    .join(', ');
+}
+
+/** Column types in CREATE TABLE (…), ALTER TABLE … ADD, and ALTER TABLE … ALTER … TYPE. */
+function columnTypes(sql: string): string {
+  const create = new RegExp(
+    String.raw`^(\s*create\s+(?:or\s+replace\s+)?(?:(?:local|global)\s+)?(?:temporary\s+|temp\s+)?table\s+(?:if\s+not\s+exists\s+)?${TABLE_REF}\s*)\(`,
+    'i',
+  ).exec(sql);
+  if (create) {
+    const open = create[0].length - 1;
+    const close = matchParen(sql, open);
+    if (close === -1) return sql;
+    return `${create[1]}(${columnDefinitions(sql.slice(open + 1, close), true)})${sql.slice(close + 1)}`;
+  }
+
+  const alter = String.raw`^(\s*alter\s+table\s+(?:if\s+exists\s+)?${TABLE_REF}\s+`;
+  const add = new RegExp(`${alter}add\\s+(?:column\\s+)?(?:if\\s+not\\s+exists\\s+)?)([\\s\\S]*)$`, 'i').exec(sql);
+  if (add) return add[1] + columnDefinitions(add[2], false);
+
+  return sql.replace(
+    new RegExp(`${alter}(?:alter|modify)\\s+(?:column\\s+)?${NAME_PART}\\s+(?:set\\s+data\\s+)?type\\s+)${TYPE}`, 'i'),
+    (_m, head: string, name: string, args?: string) => head + duckType(name, args),
+  );
+}
+
+/** Snowflake format element → [strftime, strptime]. DuckDB timestamps stop at microseconds. */
+const FORMAT_ELEMENTS: Array<[string, string, string]> = (
+  [
+    ['TZH:TZM', '%z', '%z'],
+    ['YYYY', '%Y', '%Y'],
+    ['MMMM', '%B', '%B'],
+    ['HH24', '%H', '%H'],
+    ['HH12', '%I', '%I'],
+    ['MON', '%b', '%b'],
+    ['FF9', '%n', '%n'],
+    ['FF6', '%f', '%f'],
+    ['FF3', '%g', '%g'],
+    // Bare FF is FF9, Snowflake's default fractional precision.
+    ['FF', '%n', '%n'],
+    ['YY', '%y', '%y'],
+    ['MM', '%m', '%m'],
+    ['DD', '%d', '%d'],
+    ['DY', '%a', '%a'],
+    ['MI', '%M', '%M'],
+    ['SS', '%S', '%S'],
+    ['AM', '%p', '%p'],
+    ['PM', '%p', '%p'],
+    // Literal text: dbt's catalog query formats with 'yyyy-mm-dd HH24:MI'||'UTC'.
+    ['UTC', 'UTC', 'UTC'],
+  ] as Array<[string, string, string]>
+).sort((a, b) => b[0].length - a[0].length);
+
+/** The text of a string literal, or of literals joined by `||`; null for anything else. */
+function constantText(raw: string): string | null {
+  const pieces: string[] = [];
+  let rest = raw.trim();
+  for (;;) {
+    const piece = /^'((?:[^']|'')*)'\s*/.exec(rest);
+    if (!piece) return null;
+    pieces.push(piece[1].replace(/''/g, "'"));
+    rest = rest.slice(piece[0].length);
+    if (rest.length === 0) return pieces.join('');
+    const join = /^\|\|\s*/.exec(rest);
+    if (!join) return null;
+    rest = rest.slice(join[0].length);
+  }
+}
+
+/** Snowflake date/time format literal → strftime/strptime literal; null for 'AUTO'; unknown elements throw. */
+function convertFormat(fn: string, raw: string, mode: 'format' | 'parse'): string | null {
+  const format = constantText(raw);
+  if (format === null) throw unsupported(`${fn} with a non-literal format argument`);
+  if (format.toUpperCase() === 'AUTO') return null;
+
+  let out = '';
+  let i = 0;
+  while (i < format.length) {
+    const ch = format[i];
+    if (ch === '"') {
+      const end = format.indexOf('"', i + 1);
+      if (end === -1) throw compilationError(`Unterminated quoted text in ${fn} format '${format}'.`);
+      out += format.slice(i + 1, end).replace(/%/g, '%%');
+      i = end + 1;
+      continue;
+    }
+    if (!/[A-Za-z0-9]/.test(ch)) {
+      out += ch === '%' ? '%%' : ch;
+      i += 1;
+      continue;
+    }
+    const upper = format.slice(i).toUpperCase();
+    const fraction = /^FF(\d)/.exec(upper);
+    if (fraction && !'369'.includes(fraction[1])) {
+      throw unsupported(`${fn} format element '${format.slice(i, i + 3)}' (in '${format}')`);
+    }
+    const element = FORMAT_ELEMENTS.find(([token]) => upper.startsWith(token));
+    if (!element) {
+      const token = /^(?:HH|[A-Za-z]+|\d+)/i.exec(format.slice(i))?.[0] ?? ch;
+      throw unsupported(`${fn} format element '${token}' (in '${format}')`);
+    }
+    out += mode === 'format' ? element[1] : element[2];
+    i += element[0].length;
+  }
+  return toSqlLiteral(out);
+}
+
+/** `date_trunc` unit for a CURRENT_* precision argument; null means no truncation. */
+function precisionUnit(fn: string, args: string[]): string | null {
+  if (args.length === 0) return null;
+  if (args.length > 1 || !/^\d$/.test(args[0])) {
+    throw compilationError(`${fn} takes an optional precision between 0 and 9.`);
+  }
+  const precision = Number(args[0]);
+  if (precision >= 6) return null;
+  if (precision === 3) return 'millisecond';
+  if (precision === 0) return 'second';
+  throw unsupported(`${fn} with precision ${precision}`);
+}
+
+const isStringLiteral = (value: string): boolean => constantText(value) !== null;
 
 /**
  * Translate one statement. `bindings` are positional values for `?`
@@ -455,8 +980,12 @@ export function rewrite(
   bindings: unknown[] = [],
 ): string {
   const parts: string[] = [];
-  let text = maskNonCode(sql, parts);
+  let text = maskNonCode(sql, parts, true);
   const literal = (value: string) => pushOpaque(parts, value);
+
+  // Reads quoted names itself, so it runs before they are masked.
+  text = databaseInformationSchema(text, ctx.database, literal);
+  text = maskIdentifiers(text, parts);
 
   if (bindings.length > 0) {
     let index = 0;
@@ -467,10 +996,8 @@ export function rewrite(
     });
   }
 
-  text = databaseInformationSchema(text, ctx.database, literal);
-
   // Session context functions.
-  const sessionValues: Array<[RegExp, string]> = [
+  const sessionValues: Array<[RegExp, string | null]> = [
     [/\bCURRENT_DATABASE\s*(?:\(\s*\))?/gi, ctx.database],
     [/\bCURRENT_SCHEMA\s*(?:\(\s*\))?/gi, ctx.schema],
     [/\bCURRENT_ROLE\s*(?:\(\s*\))?/gi, ctx.role],
@@ -480,10 +1007,37 @@ export function rewrite(
     [/\bCURRENT_VERSION\s*(?:\(\s*\))?/gi, ctx.version ?? '8.42.0'],
   ];
   for (const [pattern, value] of sessionValues) {
-    text = text.replace(pattern, () => literal(`'${value.replace(/'/g, "''")}'`));
+    text = text.replace(pattern, () => literal(toSqlLiteral(value)));
   }
 
-  text = castAliases(text);
+  // Clock functions. DuckDB knows the bare keywords but not the call forms.
+  for (const name of ['CURRENT_TIMESTAMP', 'LOCALTIMESTAMP']) {
+    text = replaceCall(text, name, parts, (args) => {
+      const unit = precisionUnit(name, args);
+      return unit ? `date_trunc(${literal(`'${unit}'`)}, CURRENT_TIMESTAMP)` : 'CURRENT_TIMESTAMP';
+    });
+  }
+  for (const name of ['CURRENT_TIME', 'LOCALTIME']) {
+    text = replaceCall(text, name, parts, (args) => {
+      const unit = precisionUnit(name, args);
+      return unit
+        ? `CAST(date_trunc(${literal(`'${unit}'`)}, current_localtimestamp()) AS TIME)`
+        : 'current_localtime()';
+    });
+  }
+  text = text.replace(/\bLOCALTIMESTAMP\b/gi, 'CURRENT_TIMESTAMP');
+  text = text.replace(/\b(?:CURRENT_TIME|LOCALTIME)\b(?!\s*\()/gi, 'current_localtime()');
+  text = replaceCall(text, 'CURRENT_DATE', parts, (args) => {
+    if (args.length > 0) throw compilationError('CURRENT_DATE takes no arguments.');
+    return 'CURRENT_DATE';
+  });
+  // SYSDATE is the UTC wall clock as TIMESTAMP_NTZ.
+  text = replaceCall(text, 'SYSDATE', parts, (args) => {
+    if (args.length > 0) throw compilationError('SYSDATE takes no arguments.');
+    return `timezone(${literal("'UTC'")}, CURRENT_TIMESTAMP)`;
+  });
+
+  text = castTypes(text, literal);
 
   for (const [pattern, replacement] of SIMPLE_RENAMES) {
     text = text.replace(pattern, replacement);
@@ -544,33 +1098,91 @@ export function rewrite(
         fallback = when;
         break;
       }
-      clauses.push(`WHEN ${subject} = ${when} THEN ${then}`);
+      clauses.push(`WHEN ${subject} IS NOT DISTINCT FROM ${when} THEN ${then}`);
     }
     return `CASE ${clauses.join(' ')} ELSE ${fallback} END`;
   });
 
-  // TO_VARCHAR(x[, fmt]) and friends: keep the value, drop the format string.
-  for (const [names, target] of [
-    [['TO_VARCHAR', 'TO_CHAR', 'TO_TEXT'], 'VARCHAR'],
-    [['TO_BOOLEAN'], 'BOOLEAN'],
-    [['TO_DATE'], 'DATE'],
-    [['TO_TIMESTAMP', 'TO_TIMESTAMP_NTZ', 'TO_TIMESTAMP_LTZ', 'TRY_TO_TIMESTAMP'], 'TIMESTAMP'],
-    [['TO_BINARY'], 'BLOB'],
-  ] as Array<[string[], string]>) {
-    for (const name of names) {
-      text = replaceCall(text, name, parts, (args) => {
-        if (args.length === 0) return null;
-        return `CAST(${args[0]} AS ${target})`;
+  const castCall = (tryCast: boolean, value: string, type: string) =>
+    `${tryCast ? 'TRY_CAST' : 'CAST'}(${value} AS ${type})`;
+
+  for (const name of ['TO_VARCHAR', 'TO_CHAR', 'TO_TEXT']) {
+    text = replaceCall(text, name, parts, (args, resolveArg) => {
+      if (args.length === 1) return castCall(false, args[0], 'VARCHAR');
+      if (args.length !== 2) return null;
+      const format = convertFormat(name, resolveArg(args[1]), 'format');
+      return format === null ? castCall(false, args[0], 'VARCHAR') : `strftime(${args[0]}, ${literal(format)})`;
+    });
+  }
+
+  for (const [name, tryCast] of [['TRY_TO_BOOLEAN', true], ['TO_BOOLEAN', false]] as const) {
+    text = replaceCall(text, name, parts, (args) =>
+      args.length === 1 ? castCall(tryCast, args[0], 'BOOLEAN') : null,
+    );
+  }
+
+  text = replaceCall(text, 'TO_BINARY', parts, (args, resolveArg) => {
+    if (args.length === 0 || args.length > 2) return null;
+    const format = args.length === 2 ? resolveArg(args[1]).trim().toUpperCase() : "'HEX'";
+    if (format === "'HEX'") return `unhex(${args[0]})`;
+    if (format === "'BASE64'") return `from_base64(${args[0]})`;
+    if (format === "'UTF-8'" || format === "'UTF8'") return `encode(${args[0]})`;
+    throw unsupported(`TO_BINARY format ${format}`);
+  });
+
+  for (const [name, tryCast] of [['TRY_TO_DATE', true], ['TO_DATE', false]] as const) {
+    text = replaceCall(text, name, parts, (args, resolveArg) => {
+      if (args.length === 1) return castCall(tryCast, args[0], 'DATE');
+      if (args.length !== 2) return null;
+      const format = convertFormat(name, resolveArg(args[1]), 'parse');
+      if (format === null) return castCall(tryCast, args[0], 'DATE');
+      return `CAST(${tryCast ? 'try_strptime' : 'strptime'}(${args[0]}, ${literal(format)}) AS DATE)`;
+    });
+  }
+
+  for (const [base, type] of [
+    ['TO_TIMESTAMP', 'TIMESTAMP'],
+    ['TO_TIMESTAMP_NTZ', 'TIMESTAMP'],
+    ['TO_TIMESTAMP_LTZ', 'TIMESTAMP'],
+    ['TO_TIMESTAMP_TZ', 'TIMESTAMPTZ'],
+  ]) {
+    for (const [name, tryCast] of [[`TRY_${base}`, true], [base, false]] as const) {
+      text = replaceCall(text, name, parts, (args, resolveArg) => {
+        if (args.length === 1) return castCall(tryCast, args[0], type);
+        if (args.length !== 2) return null;
+        const second = resolveArg(args[1]).trim();
+        // Numeric second argument: the scale of an epoch value (0 = seconds, 3 = ms, ...).
+        if (/^\d$/.test(second)) {
+          const scale = Number(second);
+          const micros =
+            scale <= 6 ? `CAST(${args[0]} AS BIGINT) * ${10 ** (6 - scale)}` : `CAST(${args[0]} AS BIGINT) // ${10 ** (scale - 6)}`;
+          return castCall(tryCast, `make_timestamp(${micros})`, type);
+        }
+        const format = convertFormat(name, second, 'parse');
+        if (format === null) return castCall(tryCast, args[0], type);
+        return `CAST(${tryCast ? 'try_strptime' : 'strptime'}(${args[0]}, ${literal(format)}) AS ${type})`;
       });
     }
   }
 
-  for (const name of ['TO_NUMBER', 'TO_DECIMAL', 'TO_NUMERIC', 'TRY_TO_NUMBER']) {
+  for (const base of ['TO_NUMBER', 'TO_DECIMAL', 'TO_NUMERIC']) {
+    for (const [name, tryCast] of [[`TRY_${base}`, true], [base, false]] as const) {
+      text = replaceCall(text, name, parts, (args, resolveArg) => {
+        if (args.length === 0 || args.length > 3) return null;
+        if (args.slice(1).some((arg) => isStringLiteral(resolveArg(arg)))) {
+          throw unsupported(`${name} with a format argument`);
+        }
+        const precision = args[1] ?? '38';
+        const scale = args[2] ?? '0';
+        return castCall(tryCast, args[0], `DECIMAL(${precision}, ${scale})`);
+      });
+    }
+  }
+
+  for (const [name, tryCast] of [['TRY_TO_DOUBLE', true], ['TO_DOUBLE', false]] as const) {
     text = replaceCall(text, name, parts, (args) => {
-      if (args.length === 0) return null;
-      if (args.length >= 3) return `CAST(${args[0]} AS DECIMAL(${args[1]}, ${args[2]}))`;
-      if (args.length === 2) return `CAST(${args[0]} AS DECIMAL(${args[1]}, 0))`;
-      return `CAST(${args[0]} AS DECIMAL(38, 0))`;
+      if (args.length === 2) throw unsupported(`${name} with a format argument`);
+      return args.length === 1 ? castCall(tryCast, args[0], 'DOUBLE') : null;
     });
   }
 
@@ -592,11 +1204,20 @@ export function rewrite(
     });
   }
 
-  text = replaceCall(text, 'LISTAGG', parts, (args) => {
-    if (args.length === 0) return null;
-    if (args.length === 1) return `string_agg(${args[0]}, '')`;
-    return `string_agg(${args[0]}, ${args[1]})`;
-  });
+  text = rewriteOrderedAggregate(
+    text,
+    'LISTAGG',
+    (args) => (args.length === 1 ? [args[0], "''"] : args.length === 2 ? args : null),
+    (args, order, over) => `string_agg(${args.join(', ')}${order})${over}`,
+  );
+  // Snowflake's ARRAY_AGG skips NULLs and yields [] for no input; DuckDB keeps NULLs and yields NULL.
+  text = rewriteOrderedAggregate(
+    text,
+    'ARRAY_AGG',
+    (args) => (args.length === 1 ? args : null),
+    ([arg], order, over) =>
+      `COALESCE(array_agg(${arg}${order}) FILTER (WHERE ${arg.replace(/^DISTINCT\s+/i, '')} IS NOT NULL)${over}, [])`,
+  );
 
   text = replaceCall(text, 'ARRAY_CONSTRUCT', parts, (args) => `list_value(${args.join(', ')})`);
   text = replaceCall(text, 'OBJECT_CONSTRUCT', parts, (args) => `json_object(${args.join(', ')})`);
@@ -608,34 +1229,67 @@ export function rewrite(
   );
 
   if (ctx.variantPaths !== false) {
-    // `col:field` / `col:"Field"` variant access → json_extract.
-    text = text.replace(
-      /(?<!:)([A-Za-z_][A-Za-z0-9_$]*|"[^"]*")\s*:\s*([A-Za-z_][A-Za-z0-9_$]*)/g,
-      (whole, source: string, field: string) => {
-        if (/^(https?|s3|file)$/i.test(field)) return whole;
-        return `json_extract(${source}, '$.${field}')`;
-      },
-    );
-
-    // `payload:region::string` must unquote: Snowflake's variant-to-string cast
-    // strips the JSON quotes, while json_extract keeps them.
-    text = text.replace(
-      /json_extract\(([^,]+),\s*('\$\.[^']*')\)\s*::\s*VARCHAR/g,
-      'json_extract_string($1, $2)',
-    );
-    text = text.replace(
-      /CAST\(json_extract\(([^,]+),\s*('\$\.[^']*')\)\s+AS\s+VARCHAR\)/gi,
-      'json_extract_string($1, $2)',
-    );
+    // `col:field[.sub|[n]]…` / `"Col":field` / `f(x):field` variant access → json_extract.
+    text = variantStringCasts(variantPaths(text, parts, literal));
   }
 
-  text = stripWithinGroup(text);
   text = ddlDecorations(text);
   text = columnTypes(text);
-  text = foldIdentifierCase(text);
   text = qualifyMergeInsertValues(text);
+  text = foldUnquoted(text);
 
   return unmask(text, parts);
+}
+
+export interface ColumnListCtas {
+  /** Target table as written. */
+  table: string;
+  ifNotExists: boolean;
+  /** `CREATE [OR REPLACE] TABLE t (cols)` with unenforced constraints removed. */
+  create: string;
+  /** The query after `AS`, outer parentheses removed. */
+  query: string;
+}
+
+/** Constraints Snowflake records but does not enforce (only NOT NULL is enforced). */
+const INLINE_CONSTRAINT =
+  /\s+(?:constraint\s+(?:"[^"]*"|[\w$]+)\s+)?(?:primary\s+key|unique|foreign\s+key|references\s+[\w$".]+(?:\s*\([^)]*\))?)(?:\s+(?:not\s+)?enforced|\s+(?:no)?rely|\s+(?:not\s+)?deferrable|\s+initially\s+(?:deferred|immediate)|\s+enable|\s+disable|\s+(?:no)?validate)*/gi;
+
+/** Split dbt's contract DDL, `CREATE TABLE t (cols) AS (query)`; DuckDB has no CTAS with a column list. */
+export function splitColumnListCtas(sql: string): ColumnListCtas | null {
+  const parts: string[] = [];
+  const masked = maskNonCode(sql, parts);
+  const head =
+    /^\s*create\s+(?:or\s+replace\s+)?(?:(?:local|global)\s+)?(?:transient\s+|temporary\s+|temp\s+|volatile\s+)?table\s+(if\s+not\s+exists\s+)?((?:"[^"]*"|[\w$]+)(?:\s*\.\s*(?:"[^"]*"|[\w$]+))*)\s*\(/i.exec(
+      masked,
+    );
+  if (!head) return null;
+
+  const open = head[0].length - 1;
+  const close = matchParen(masked, open);
+  if (close === -1) return null;
+
+  const after = masked.slice(close + 1);
+  const as = /\bAS\b/i.exec(after);
+  if (!as) return null;
+  // Only decorations may sit between the column list and AS; anything else goes to DuckDB unchanged.
+  if (ddlDecorations(after.slice(0, as.index)).trim().length > 0) return null;
+
+  const columns = splitTopLevel(masked.slice(open + 1, close))
+    .filter((column) => !/^(?:constraint\b|primary\s+key\b|unique\b|foreign\s+key\b)/i.test(column))
+    .map((column) => column.replace(INLINE_CONSTRAINT, ''));
+
+  let query = after.slice(as.index + as[0].length).trim();
+  if (query.startsWith('(') && matchParen(query, 0) === query.length - 1) {
+    query = query.slice(1, -1).trim();
+  }
+
+  return {
+    table: unmask(head[2], parts),
+    ifNotExists: Boolean(head[1]),
+    create: unmask(`${masked.slice(0, open)}(${columns.join(', ')})`, parts),
+    query: unmask(query, parts),
+  };
 }
 
 /** Render a JavaScript value as a SQL literal. */

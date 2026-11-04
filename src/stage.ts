@@ -17,8 +17,6 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
 
-import { normalizeName } from './catalog.js';
-
 export interface StagedFile {
   /** Path relative to the stage root, e.g. `orders/data.csv`. */
   name: string;
@@ -26,8 +24,9 @@ export interface StagedFile {
   modified: Date;
 }
 
+/** Parts are canonical keys; only path-unsafe characters change. */
 function safeSegment(part: string): string {
-  return normalizeName(part).replace(/[^\w$.-]/g, '_');
+  return part.replace(/[^\w$.-]/g, '_');
 }
 
 export class StageStore {
@@ -118,5 +117,11 @@ export class StageStore {
 
   async removeAll(directory: string): Promise<void> {
     await rm(directory, { recursive: true, force: true });
+  }
+
+  /** Remove every stage directory of a database, or of one of its schemas. */
+  async removeScope(database: string, schema?: string): Promise<void> {
+    const parts = schema === undefined ? [database] : [database, schema];
+    await rm(join(this.root, ...parts.map(safeSegment)), { recursive: true, force: true });
   }
 }
