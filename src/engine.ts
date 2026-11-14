@@ -22,7 +22,7 @@ import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
 
 import { toSqlLiteral } from './dialect.js';
 import { mapEngineError } from './errors.js';
-import { REMOVE_OPTIONS, type DataDir } from './persist.js';
+import type { DataDir } from './persist.js';
 
 export interface RawColumn {
   name: string;
@@ -80,7 +80,6 @@ export class Engine {
   /** Dedicated connection for catalog/metadata work, never a session's context. */
   private readonly admin: DuckDBConnection;
   private readonly attached = new Set<string>();
-  private readonly connections = new Set<EngineConnection>();
   private closed = false;
 
   private constructor(
@@ -236,33 +235,22 @@ export class Engine {
   async newConnection(): Promise<EngineConnection> {
     if (this.closed) throw new Error('Engine is closed.');
     const connection = await this.instance.connect();
-    return new EngineConnection(connection, this.connections);
+    return new EngineConnection(connection);
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    // DuckDB holds a database file until every connection is closed, and Windows
-    // then refuses to delete or reopen it. Sessions can be dropped from the
-    // registry without closing, so the engine owns the full set.
-    for (const connection of [...this.connections]) connection.close();
-    this.connections.clear();
     this.admin.closeSync?.();
     this.instance.closeSync?.();
-    await rm(this.noContextDir, { ...REMOVE_OPTIONS, recursive: true });
+    await rm(this.noContextDir, { recursive: true, force: true });
   }
 }
 
 export class EngineConnection {
   private current: string | null = null;
-  private closed = false;
 
-  constructor(
-    private readonly connection: DuckDBConnection,
-    private readonly owner: Set<EngineConnection> | null = null,
-  ) {
-    owner?.add(this);
-  }
+  constructor(private readonly connection: DuckDBConnection) {}
 
   /** Snowflake `USE`. No current database or schema → the empty read-only catalog. */
   async use(database: string | null, schema: string | null): Promise<void> {
@@ -309,9 +297,6 @@ export class EngineConnection {
   }
 
   close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.owner?.delete(this);
     this.connection.closeSync?.();
   }
 }

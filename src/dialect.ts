@@ -157,22 +157,6 @@ function maskNonCode(sql: string, parts: string[], decode = false): string {
   return out;
 }
 
-/**
- * True when `sql` holds more than one statement.
- *
- * DuckDB would run the whole batch and answer with one result, while routing
- * (`SHOW`, `USE`, `DESCRIBE`, account DDL) is decided by the first statement
- * alone — a batch can then look like it worked. Snowflake clients send one
- * statement per request, so the server refuses the batch instead.
- */
-export function hasMultipleStatements(sql: string): boolean {
-  // Identifiers first: maskNonCode keeps `"…"` verbatim, so a semicolon inside
-  // one would otherwise look like a statement separator. Empty statements
-  // (`SELECT 1; ;`) do not count.
-  const masked = maskNonCode(maskIdentifiers(sql, []), []);
-  return masked.split(';').filter((part) => part.trim().length > 0).length > 1;
-}
-
 function unmask(sql: string, parts: string[]): string {
   return sql.replace(MARKED, (_m, _marker: string, idx: string) => parts[Number(idx)] ?? '');
 }

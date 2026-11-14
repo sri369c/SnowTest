@@ -10,7 +10,6 @@
  */
 
 import { Catalog, normalizeName } from './catalog.js';
-import type { EngineConnection } from './engine.js';
 
 export interface SessionParameter {
   name: string;
@@ -65,7 +64,7 @@ export class Session {
   readonly catalog: Catalog;
 
   /** Set once by the server so the session can execute statements. */
-  connection: EngineConnection | null = null;
+  connection: unknown = null;
 
   constructor(options: SessionOptions, catalog: Catalog) {
     this.id = options.id;

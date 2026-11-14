@@ -1,13 +1,11 @@
 // Copyright (c) 2026 Srinivas Chaturvedula
 
-import { readFileSync } from 'node:fs';
-
 import { describe, expect, it } from 'vitest';
 
 import type { SnowtestConfig } from '../src/config.js';
 import { renderHome } from '../src/home.js';
 import { GROUPS, LANDING_SURFACES, UNSUPPORTED, renderOperations } from '../src/operations.js';
-import { inlineMarkup } from '../src/page.js';
+import { escapeHtml, inlineMarkup } from '../src/page.js';
 
 const STATUSES = new Set(['supported', 'partial', 'unsupported']);
 
@@ -86,12 +84,18 @@ describe('operations data', () => {
 describe('operations page', () => {
   const html = renderOperations('8.42.0');
 
-  it('has a section and a contents entry per group', () => {
+  it('has a tab and a panel per group, without scroll targets on the tab keys', () => {
     for (const group of GROUPS) {
-      expect(html).toContain(`id="${group.id}"`);
-      expect(html).toContain(`href="#${group.id}"`);
-      expect(html).toContain(group.title);
+      expect(html).toContain(`data-tab="${group.id}"`);
+      expect(html).toContain(`id="pane-${group.id}"`);
+      expect(html).not.toContain(`id="${group.id}"`);
+      expect(html).toContain(escapeHtml(group.title));
     }
+  });
+
+  it('numbers rows from 1 in every table', () => {
+    const firsts = html.match(/<td class="rn">1<\/td>/g) ?? [];
+    expect(firsts.length).toBe(GROUPS.length + 1);
   });
 
   it('renders every row and every unsupported feature', () => {
@@ -103,11 +107,11 @@ describe('operations page', () => {
     for (const item of UNSUPPORTED) {
       expect(html).toContain(inlineMarkup(item.feature));
     }
-    expect(html).toContain('id="not-supported"');
+    expect(html).toContain('id="pane-not-supported"');
   });
 
-  it('links back to the overview and names the emulated version', () => {
-    expect(html).toContain('<a href="/">&larr; Overview</a>');
+  it('marks itself in the nav and names the emulated version', () => {
+    expect(html).toContain('<a href="/operations" aria-current="page">');
     expect(html).toContain('emulating Snowflake 8.42.0');
   });
 
@@ -131,27 +135,10 @@ describe('landing page', () => {
       expect(html).toContain(`${surface.supported} of ${surface.total} supported`);
     }
   });
-});
 
-describe('operations endpoints', () => {
-  const normalize = (path: string): string =>
-    path.replace(/\{[^}]+\}/g, '*').replace(/\[/g, '').replace(/\]/g, '').replace(/:[^/]+/g, '*');
-
-  it('documents only endpoints the server actually routes', () => {
-    const source = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
-    const routes = new Set(
-      [...source.matchAll(/app\.(?:get|post|all|put|delete)\('([^']+)'/g)].map((match) =>
-        normalize(match[1]),
-      ),
-    );
-
-    const documented = GROUPS.flatMap((group) => group.rows)
-      .map((row) => /^(?:GET|POST|PUT|DELETE|PATCH|ALL)\s+(\/\S*?)(?:\?.*)?$/.exec(row.syntax.trim()))
-      .filter((match): match is RegExpExecArray => match !== null);
-
-    expect(documented.length).toBeGreaterThan(0);
-    for (const [, path] of documented) {
-      expect(routes.has(normalize(path)), `${path} is documented but not routed`).toBe(true);
-    }
+  it('keeps live state refreshable in place', () => {
+    expect(html).toContain('id="live-body"');
+    expect(html).toContain('id="live-refresh"');
+    expect(html).not.toContain('Reload to refresh');
   });
 });

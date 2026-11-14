@@ -10,6 +10,7 @@
  */
 
 import { escapeHtml, renderPage } from './page.js';
+import { SERVER_VERSION } from './protocol.js';
 
 /** Rows shown per preview. Small enough to stay a glance, not a table dump. */
 export const PREVIEW_LIMIT = 50;
@@ -96,7 +97,6 @@ export function renderSchema(
       .join('\n') || '      <tr><td colspan="4">This schema has no tables or views.</td></tr>';
 
   const body = `${pageHead(database, schema)}
-<span class="tag">snowtest &middot; catalog</span>
 <h1>${escapeHtml(database)}.${escapeHtml(schema)}</h1>
 <p class="lede">
   ${tables.length} object(s): ${columnCount(tables, 'TABLE')} table(s), ${columnCount(tables, 'VIEW')} view(s).
@@ -117,7 +117,7 @@ ${rows}
   client; the reference for what it answers is at <a href="/operations">/operations</a>.
 </footer>`;
 
-  return renderPage({ title: `snowtest — ${database}.${schema}`, body });
+  return renderPage({ title: `snowtest — ${database}.${schema}`, body, version: SERVER_VERSION });
 }
 
 /** `/browse/<database>/<schema>/<table>`: columns and the first rows. */
@@ -154,7 +154,6 @@ export function renderPreview(preview: BrowsePreview): string {
         : 'The whole table, read-only. Point a Snowflake client at this server to query it yourself.';
 
   const body = `${pageHead(database, schema, table)}
-<span class="tag">snowtest &middot; preview</span>
 <h1><code>${escapeHtml(table)}</code></h1>
 <p class="lede">
   ${escapeHtml(preview.kind.toLowerCase())} in <a href="${browsePath(database, schema)}">${escapeHtml(database)}.${escapeHtml(schema)}</a>.
@@ -178,15 +177,14 @@ ${bodyRows}
   ${footer}
 </footer>`;
 
-  return renderPage({ title: `snowtest — ${database}.${schema}.${table}`, body });
+  return renderPage({ title: `snowtest — ${database}.${schema}.${table}`, body, version: SERVER_VERSION });
 }
 
 /** Shown when a database, schema or object is not there (or has been dropped). */
 export function renderMissing(title: string, detail: string): string {
   const body = `<p class="crumb"><a href="/">&larr; Overview</a></p>
-<span class="tag">snowtest &middot; catalog</span>
 <h1>${escapeHtml(title)}</h1>
 <p class="lede">${escapeHtml(detail)}</p>
 <p><a href="/">Back to the overview</a></p>`;
-  return renderPage({ title: `snowtest — ${title}`, body });
+  return renderPage({ title: `snowtest — ${title}`, body, version: SERVER_VERSION });
 }

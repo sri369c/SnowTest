@@ -18,16 +18,8 @@ import { Hono, type Context } from 'hono';
 
 import { Catalog, normalizeName } from './catalog.js';
 import { loadConfig, type SnowtestConfig } from './config.js';
-import { hasMultipleStatements } from './dialect.js';
-import { Engine, quoteIdent } from './engine.js';
-import {
-  SnowflakeError,
-  authError,
-  compilationError,
-  mapEngineError,
-  multipleStatements,
-  sessionExpired,
-} from './errors.js';
+import { Engine, quoteIdent, type EngineConnection } from './engine.js';
+import { SnowflakeError, authError, mapEngineError, sessionExpired } from './errors.js';
 import {
   PREVIEW_LIMIT,
   renderMissing,
@@ -37,7 +29,7 @@ import {
 } from './browse.js';
 import { renderHome, type HomeDatabaseState } from './home.js';
 import { renderOperations } from './operations.js';
-import { renderUsage } from './usage.js';
+import { renderConfiguration, renderTroubleshooting } from './usage.js';
 import { PACKAGE_VERSION } from './version.js';
 import { StatementRouter, type Outcome } from './meta.js';
 import { DataDir } from './persist.js';
@@ -263,29 +255,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
   >();
   const sessions = new SessionRegistry();
-  const router = new StatementRouter(engine, catalog, new StageStore(), dataDir, {
-    database: config.defaultDatabase,
-    schema: config.defaultSchema,
-    warehouse: config.defaultWarehouse,
-    role: config.defaultRole,
-  });
-
-  // Every successful result, so RESULT_SCAN can serve an earlier query id.
-  const results = new Map<string, { outcome: Outcome; session: Session }>();
-
-  // `get_results_from_sfqid` asks for the result again as
-  // `SELECT * FROM TABLE(RESULT_SCAN('<id>'))`; answer from memory rather than
-  // forwarding a table function DuckDB does not have.
-  const RESULT_SCAN =
-    /^\s*select\s+\*\s+from\s+(?:table\s*\(\s*)?result_scan\s*\(\s*'([^']+)'\s*\)\s*\)?\s*;?\s*$/i;
-
-  const scannedOutcome = (sql: string): Outcome | null => {
-    const match = RESULT_SCAN.exec(sql);
-    if (!match) return null;
-    const stored = results.get(match[1]) ?? asyncResults.get(match[1]);
-    if (!stored) throw compilationError(`Invalid query id '${match[1]}'.`);
-    return stored.outcome;
-  };
+  const router = new StatementRouter(engine, catalog, new StageStore(), dataDir);
 
   // Persisted databases come back first, so their schemas and stages can be restored.
   const persisted = dataDir ? await dataDir.databases() : [];
@@ -376,9 +346,11 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   // `src/operations.ts` so the summary on `/` and this page share one source.
   app.get('/operations', (c) => c.html(renderOperations(SERVER_VERSION)));
 
-  // Configuration and troubleshooting, rendered from the same option table the
-  // CLI prints in `--help`.
-  app.get('/usage', (c) => c.html(renderUsage(SERVER_VERSION)));
+  // Flags and environment rendered from the same option table the CLI prints in
+  // `--help`; `/usage` is the old address and redirects so bookmarks keep working.
+  app.get('/configuration', (c) => c.html(renderConfiguration(SERVER_VERSION)));
+  app.get('/usage', (c) => c.redirect('/configuration', 301));
+  app.get('/troubleshooting', (c) => c.html(renderTroubleshooting(SERVER_VERSION)));
 
   // ---------------------------------------------------------------------------
   // Catalog browser, read-only: the counts on `/` are a link into the data.
@@ -531,7 +503,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
   app.post('/_snowtest/reset', async (c) => {
     for (const session of sessions.all()) {
-      const connection = session.connection;
+      const connection = session.connection as EngineConnection | null;
       connection?.close();
       session.connection = null;
     }
@@ -717,7 +689,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       const session = sessions.delete(token);
       if (session) {
         log(`logout session=${session.id} user=${session.user}`);
-        const connection = session.connection;
+        const connection = session.connection as EngineConnection | null;
         connection?.close();
         session.connection = null;
       }
@@ -752,14 +724,10 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
     const startedAt = Date.now();
     try {
-      if (hasMultipleStatements(sql)) throw multipleStatements();
-      const outcome =
-        scannedOutcome(sql) ??
-        (await router.execute(sql, session, {
-          bindings: normalizeBindings(body.bindings),
-        }));
+      const outcome = await router.execute(sql, session, {
+        bindings: normalizeBindings(body.bindings),
+      });
       logQuery('driver', session, startedAt, sql, outcome);
-      results.set(queryId, { outcome, session });
 
       // PUT/GET: the client acts on this descriptor directly (it moves the
       // bytes), so the response data *is* the file-transfer payload.
@@ -832,13 +800,9 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
   });
 
-  // Connector 5.x fetches an async result from /queries/{id}/result directly;
-  // 4.x re-runs RESULT_SCAN instead (handled above). Both read the same entry.
-  const storedResult = (queryId: string) => results.get(queryId) ?? asyncResults.get(queryId);
-
-  const serveResult = (c: Context) => {
-    const queryId = c.req.param('queryId') ?? '';
-    const entry = storedResult(queryId);
+  app.all('/queries/v1/query-result/:queryId', (c) => {
+    const queryId = c.req.param('queryId');
+    const entry = asyncResults.get(queryId);
     if (!entry) {
       return c.json(
         driverErrorResponse(
@@ -848,10 +812,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       );
     }
     return c.json(driverQueryResponse(entry.session, entry.outcome, queryId));
-  };
-
-  app.all('/queries/v1/query-result/:queryId', serveResult);
-  app.all('/queries/:queryId/result', serveResult);
+  });
 
   app.get('/monitoring/queries/*', (c) => {
     const segments = new URL(c.req.url).pathname.split('/').filter(Boolean);
@@ -972,11 +933,8 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
     const startedAt = Date.now();
     try {
-      if (hasMultipleStatements(statement)) throw multipleStatements();
-      const outcome =
-        scannedOutcome(statement) ?? (await router.execute(statement, session, { bindings }));
+      const outcome = await router.execute(statement, session, { bindings });
       logQuery('api', session, startedAt, statement, outcome);
-      results.set(queryId, { outcome, session });
       const response = sqlApiResult(session, outcome, queryId, statementHandle);
       statements.set(statementHandle, {
         outcome,
@@ -1124,7 +1082,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     },
     async close() {
       for (const session of sessions.all()) {
-        const connection = session.connection;
+        const connection = session.connection as EngineConnection | null;
         connection?.close();
         session.connection = null;
       }

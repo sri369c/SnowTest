@@ -11,7 +11,7 @@
  * landing page, the counts and the tests all read from this table.
  */
 
-import { escapeHtml, inlineMarkup, renderPage } from './page.js';
+import { escapeHtml, inlineMarkup, renderPage, renderTabs } from './page.js';
 
 export type OperationStatus = 'supported' | 'partial' | 'unsupported';
 
@@ -28,6 +28,8 @@ export interface OperationRow {
 export interface OperationGroup {
   /** Anchor on this page; also the landing-page link target. */
   id: string;
+  /** Short tab label; `title` is the panel heading. */
+  tab: string;
   title: string;
   summary: string;
   /** Set to also appear in the landing page's summary table, under this label. */
@@ -47,6 +49,7 @@ const ENDPOINT_COLUMNS: [string, string, string] = ['Endpoint', 'Purpose', 'Stat
 export const GROUPS: OperationGroup[] = [
   {
     id: 'driver-protocol',
+    tab: 'Driver',
     title: 'Driver protocol',
     summary: 'The paths Snowflake drivers call: login, heartbeat, query, fetch, logout.',
     landingLabel: 'Driver protocol',
@@ -80,15 +83,9 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'GET /queries/v1/query-result/:queryId',
-        behaviour: 'Fetches a stored result for a query id (connector 4.x).',
+        behaviour: 'Fetches a stored result for a query id.',
         status: 'partial',
         note: 'One partition. A real account may return partitions 0…n.',
-      },
-      {
-        syntax: 'GET /queries/:queryId/result',
-        behaviour: 'Fetches a stored result for a query id (connector 5.x).',
-        status: 'partial',
-        note: 'One partition, and only ids this process still holds in memory.',
       },
       {
         syntax: 'POST /queries/v1/abort-request',
@@ -110,6 +107,7 @@ export const GROUPS: OperationGroup[] = [
   },
   {
     id: 'sql-api',
+    tab: 'SQL API',
     title: 'SQL REST API v2',
     summary: 'The documented HTTP API: submit a statement, poll a handle, cancel it.',
     landingLabel: 'SQL REST API v2',
@@ -149,6 +147,7 @@ export const GROUPS: OperationGroup[] = [
   },
   {
     id: 'control-plane',
+    tab: 'Control plane',
     title: 'Control plane',
     summary: 'Endpoints for tests and operators, outside the Snowflake surface.',
     columns: ENDPOINT_COLUMNS,
@@ -156,8 +155,13 @@ export const GROUPS: OperationGroup[] = [
       { syntax: 'GET /', behaviour: 'The landing page: what this is, and how to connect.', status: 'supported' },
       { syntax: 'GET /operations', behaviour: 'This page.', status: 'supported' },
       {
-        syntax: 'GET /usage',
-        behaviour: 'Configuration, the launcher, staging and troubleshooting, for the running build.',
+        syntax: 'GET /configuration',
+        behaviour: 'Flags and environment, the launcher, the control plane and staging, for the running build. `GET /usage` redirects here.',
+        status: 'supported',
+      },
+      {
+        syntax: 'GET /troubleshooting',
+        behaviour: 'Common symptoms, their causes and fixes.',
         status: 'supported',
       },
       {
@@ -189,6 +193,7 @@ export const GROUPS: OperationGroup[] = [
   },
   {
     id: 'sessions',
+    tab: 'Sessions',
     title: 'Sessions and authentication',
     summary: 'Who may connect, and what a session remembers.',
     columns: ['Feature', 'Behaviour', 'Status'],
@@ -234,6 +239,7 @@ export const GROUPS: OperationGroup[] = [
   },
   {
     id: 'account-objects',
+    tab: 'Objects',
     title: 'Databases, schemas and account objects',
     summary: 'What can be created, and how much of it is only recorded.',
     columns: STATUS_COLUMNS,
@@ -302,6 +308,7 @@ export const GROUPS: OperationGroup[] = [
   },
   {
     id: 'metadata',
+    tab: 'Metadata',
     title: 'Metadata and reflection',
     summary: 'What dbt, SQLAlchemy and the connector ask about the catalog.',
     landingLabel: 'Metadata',
@@ -350,6 +357,7 @@ export const GROUPS: OperationGroup[] = [
   },
   {
     id: 'sql',
+    tab: 'SQL',
     title: 'SQL execution',
     summary: 'DuckDB behind a Snowflake dialect layer: the statements that reach it.',
     landingLabel: 'SQL execution',
@@ -424,6 +432,7 @@ export const GROUPS: OperationGroup[] = [
   },
   {
     id: 'functions',
+    tab: 'Functions',
     title: 'Function translation',
     summary: 'Snowflake functions and types rewritten to DuckDB equivalents.',
     columns: ['Family', 'Translation', 'Status'],
@@ -503,6 +512,7 @@ export const GROUPS: OperationGroup[] = [
   },
   {
     id: 'staging',
+    tab: 'Stages',
     title: 'Staged files',
     summary: 'Local-filesystem stages: upload, list, load, download, remove.',
     landingLabel: 'Staged files',
@@ -566,7 +576,11 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
   {
     feature: 'Multiple statements per request',
     outcome:
-      'Refused with a compilation error. DuckDB would run the whole batch but return one result, while routing (`SHOW`, `USE`, `DESCRIBE`, account DDL, `ALTER TABLE`) followed the first statement alone — a batch could look like it worked. `MULTI_STATEMENT_COUNT` is ignored. dbt and the connector’s `execute_string` split client-side.',
+      'Not split: DuckDB runs every statement but only one result comes back, chosen by DuckDB rather than by Snowflake’s rules; routing (`SHOW`, `USE`, `DESCRIBE`, account DDL, `ALTER TABLE`) is decided by the first statement alone. `MULTI_STATEMENT_COUNT` is ignored. dbt and the connector’s `execute_string` split client-side.',
+  },
+  {
+    feature: 'Driver async execution (`execute_async`)',
+    outcome: 'Not polled. Use the SQL API with `async=true` for asynchronous work.',
   },
   {
     feature: 'LATERAL FLATTEN and table functions',
@@ -616,22 +630,26 @@ export const LANDING_SURFACES = GROUPS.filter((group) => group.landingLabel !== 
   }),
 );
 
-function renderRow(row: OperationRow): string {
+function renderRow(row: OperationRow, index: number): string {
   const note = row.note ? `<span class="note">${inlineMarkup(row.note)}</span>` : '';
   return `      <tr>
+        <td class="rn">${index + 1}</td>
         <td><code>${escapeHtml(row.syntax)}</code></td>
         <td>${inlineMarkup(row.behaviour)}${note}</td>
         <td><span class="pill pill-${row.status}">${STATUS_TEXT[row.status]}</span></td>
       </tr>`;
 }
 
+const paneHead = (title: string, count: number): string =>
+  `<h2 class="panehead">${escapeHtml(title)} <span class="badge">${count} entries</span></h2>`;
+
 function renderGroup(group: OperationGroup): string {
   const rows = group.rows.map(renderRow).join('\n');
-  return `<h2 id="${escapeHtml(group.id)}">${escapeHtml(group.title)}</h2>
+  return `${paneHead(group.title, group.rows.length)}
 <p class="muted">${escapeHtml(group.summary)}</p>
 <table>
   <thead>
-    <tr><th scope="col">${escapeHtml(group.columns[0])}</th><th scope="col">${escapeHtml(group.columns[1])}</th><th scope="col">${escapeHtml(group.columns[2])}</th></tr>
+    <tr><th scope="col" class="rn">#</th><th scope="col">${escapeHtml(group.columns[0])}</th><th scope="col">${escapeHtml(group.columns[1])}</th><th scope="col">${escapeHtml(group.columns[2])}</th></tr>
   </thead>
   <tbody>
 ${rows}
@@ -645,23 +663,30 @@ export function renderOperations(version: string): string {
   const counts = STATUS_ORDER.map((status) => `${countByStatus(status)} ${STATUS_TEXT[status]}`).join(', ');
   const entries = total + UNSUPPORTED.length;
 
-  const toc = [
-    ...GROUPS.map(
-      (group) =>
-        `        <li><a href="#${escapeHtml(group.id)}">${escapeHtml(group.title)}</a><span class="count">${group.rows.length}</span></li>`,
-    ),
-    `        <li><a href="#not-supported">Not supported</a><span class="count">${UNSUPPORTED.length}</span></li>`,
-  ].join('\n');
-
-  const groups = GROUPS.map(renderGroup).join('\n\n');
   const unsupportedRows = UNSUPPORTED.map(
-    (item) =>
-      `      <tr><td>${inlineMarkup(item.feature)}</td><td>${inlineMarkup(item.outcome)}</td></tr>`,
+    (item, index) =>
+      `      <tr><td class="rn">${index + 1}</td><td>${inlineMarkup(item.feature)}</td><td>${inlineMarkup(item.outcome)}</td></tr>`,
   ).join('\n');
+  const unsupported = `${paneHead('Not supported', UNSUPPORTED.length)}
+<p class="muted">Called out so nobody guesses, and so a failure is understood before it is debugged.</p>
+<table>
+  <thead>
+    <tr><th scope="col" class="rn">#</th><th scope="col">Feature</th><th scope="col">What you get</th></tr>
+  </thead>
+  <tbody>
+${unsupportedRows}
+  </tbody>
+</table>`;
 
-  const body = `<p class="crumb"><a href="/">&larr; Overview</a></p>
-<span class="tag">snowtest &middot; emulating Snowflake ${escapeHtml(version)}</span>
-<h1>Supported operations</h1>
+  const tabs = renderTabs(
+    [
+      ...GROUPS.map((group) => ({ id: group.id, label: group.tab, title: group.title, html: renderGroup(group) })),
+      { id: 'not-supported', label: 'Not supported', html: unsupported },
+    ],
+    { hash: true, variant: 'dense' },
+  );
+
+  const body = `<h1>Supported operations</h1>
 <p class="lede">
   Everything this server answers: the driver protocol, the SQL REST API, the control
   plane, and the SQL it can run. A row marked partial works but has a gap, and every
@@ -674,34 +699,9 @@ export function renderOperations(version: string): string {
   plus ${UNSUPPORTED.length} features listed as not supported.
 </div>
 
-<div class="layout">
-  <nav class="toc" aria-label="On this page">
-    <div class="muted">On this page</div>
-    <ol>
-${toc}
-    </ol>
-  </nav>
+<div class="ops">
+${tabs}
+</div>`;
 
-  <main class="ops">
-${groups}
-
-<h2 id="not-supported">Not supported</h2>
-<p class="muted">Called out so nobody guesses, and so a failure is understood before it is debugged.</p>
-<table>
-  <thead>
-    <tr><th scope="col">Feature</th><th scope="col">What you get</th></tr>
-  </thead>
-  <tbody>
-${unsupportedRows}
-  </tbody>
-</table>
-
-  </main>
-</div>
-
-<footer>
-  Configuration and troubleshooting are at <a href="/usage">/usage</a>.
-</footer>`;
-
-  return renderPage({ title: 'snowtest — supported operations', body, bodyClass: 'wide' });
+  return renderPage({ title: 'snowtest — supported operations', body, version, nav: 'operations' });
 }

@@ -1,6 +1,6 @@
 {
   "name": "snowtest",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "A Snowflake-compatible stub server for testing systems that expect a real Snowflake account.",
   "license": "MIT",
   "type": "module",
@@ -28,7 +28,7 @@
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=20"

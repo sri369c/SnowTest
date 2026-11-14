@@ -1,23 +1,23 @@
 # Copyright (c) 2026 Srinivas Chaturvedula
 
 # Works with `docker compose` and with `podman compose` / `podman-compose`.
-# The stage volume is a named volume, so podman relabels it for SELinux itself.
-# Rootless podman: `setup.py up` binds the stage directory instead and adds
-# --userns=keep-id:uid=1000,gid=1000, which is what lets a host-side dbt seed work.
+# Same network, port and data volume as `./setup.py up` defaults.
+# Stages live in a named volume: reachable from other containers only; host-side PUT/GET needs setup.py.
 services:
   snowtest:
     build: .
-    image: snowtest:2.0.0
+    image: snowtest:3.0.0
     ports:
       - "3030:3030"
     environment:
       SNOWTEST_PORT: "3030"
+      # Remove to keep everything in memory (a restart is then a clean slate).
+      SNOWTEST_DATA_DIR: /var/lib/snowtest/data
       # Set to verify key-pair logins; see the README or the running server's /usage page.
       # SNOWTEST_JWT_PUBLIC_KEY: /keys/rsa_key.pub
     volumes:
-      # Stage directories survive container replacement. To use PUT/GET from a
-      # client in another container, mount this volume there at the same path.
       - snowtest-stages:/var/lib/snowtest/stages
+      - snowtest-data:/var/lib/snowtest/data
     networks:
       - snowtest-network
     restart: unless-stopped
@@ -29,3 +29,6 @@ networks:
 
 volumes:
   snowtest-stages:
+    name: snowtest-stages
+  snowtest-data:
+    name: snowtest-data

@@ -35,13 +35,6 @@ export function compilationError(message: string, sqlState = '42000'): Snowflake
   return new SnowflakeError('002003', `SQL compilation error:\n${message}`, sqlState, 'compile');
 }
 
-/** Snowflake's drivers send one statement per request; a batch would answer ambiguously. */
-export function multipleStatements(): SnowflakeError {
-  return compilationError(
-    'Multiple statements in one request are not supported on snowtest; send one statement per request.',
-  );
-}
-
 /** `002003` — object does not exist or not authorized; `USE` reports Snowflake's nameless `002043`. */
 export function objectNotFound(kind: string, name: string, code: '002003' | '002043' = '002003'): SnowflakeError {
   return new SnowflakeError(

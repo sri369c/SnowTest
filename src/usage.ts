@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Srinivas Chaturvedula
 
 /**
- * The page served at `/usage`.
+ * The pages served at `/configuration` and `/troubleshooting`.
  *
  * It replaces the markdown usage document that used to live in `docs/`, which
  * described a build nobody could identify: the page always belongs to the
@@ -14,7 +14,7 @@
  */
 
 import { ENV_ONLY, OPTIONS } from './options.js';
-import { escapeHtml, inlineMarkup, renderPage } from './page.js';
+import { escapeHtml, inlineMarkup, renderPage, renderTabs } from './page.js';
 
 const dash = '<span class="null">—</span>';
 
@@ -44,47 +44,15 @@ const TROUBLESHOOTING: Array<[string, string]> = [
   ['`PUT` or `COPY INTO` fails on paths', 'Client and server must see the same absolute path. Share the stage directory.'],
   ['A client in another container cannot connect', 'It resolved `127.0.0.1` to itself. Use the container name (`host: snowtest`) on the same network.'],
   ['The client refuses plain HTTP', 'There is no TLS. Set `protocol: http`, or terminate TLS in a proxy.'],
-  ['Data is gone after a restart', 'That is the default: the server ran in memory. Set `SNOWTEST_DATA_DIR` on the container, e.g. `./setup.py up --env SNOWTEST_DATA_DIR=/var/lib/snowtest/data`, to keep database files.'],
+  ['Data is gone after a restart', 'The server ran in memory. Set `SNOWTEST_DATA_DIR`; `./setup.py up` does unless `--no-persist`.'],
   ['`COPY INTO` loads more rows than expected', 'An earlier file is still on the stage. `REMOVE @stage` first, or use a fresh stage root.'],
-  ['`RESULT_SCAN` fails after a restart', 'Query results live in process memory, so an id from before the restart cannot be scanned.'],
+  ['`execute_async` returns no rows', 'Connector async polling is not implemented. Use the SQL API with `async=true`.'],
   ['Podman: permission denied on the mount', 'Rootless mapping or a missing SELinux label. `./setup.py up` sets both.'],
 ];
 
-export function renderUsage(version: string): string {
-  const troubleshooting = TROUBLESHOOTING.map(
-    ([symptom, fix]) => `      <tr><td>${inlineMarkup(symptom)}</td><td>${inlineMarkup(fix)}</td></tr>`,
-  ).join('\n');
+const pane = (title: string, html: string): string => `<h2 class="panehead">${escapeHtml(title)}</h2>\n${html}`;
 
-  const toc = [
-    ['configuration', 'Configuration'],
-    ['launcher', 'Launcher'],
-    ['control-plane', 'Control plane'],
-    ['staging', 'Staged files'],
-    ['troubleshooting', 'Troubleshooting'],
-  ]
-    .map(([id, title]) => `        <li><a href="#${id}">${title}</a></li>`)
-    .join('\n');
-
-  const body = `<p class="crumb"><a href="/">&larr; Overview</a></p>
-<span class="tag">snowtest &middot; emulating Snowflake ${escapeHtml(version)}</span>
-<h1>Usage</h1>
-<p class="lede">
-  How this process is configured and how to get out of trouble with it. The flags
-  and defaults below are the ones built into the version you are talking to, so
-  this page cannot describe a build older than the one serving it.
-</p>
-
-<div class="layout">
-  <nav class="toc" aria-label="On this page">
-    <div class="muted">On this page</div>
-    <ol>
-${toc}
-    </ol>
-  </nav>
-
-  <main class="ops">
-<h2 id="configuration">Configuration</h2>
-<p class="muted">Flags override environment variables. Defaults are the server's own;
+const FLAGS = `<p class="muted">Flags override environment variables. Defaults are the server's own;
 the container launchers set <code>SNOWTEST_PORT=3030</code>.</p>
 <table>
   <thead>
@@ -103,10 +71,9 @@ ${flagTable()}
   <tbody>
 ${envTable()}
   </tbody>
-</table>
+</table>`;
 
-<h2 id="launcher">Launcher</h2>
-<p><code>setup.py</code> wraps the container so nobody has to remember the podman
+const LAUNCHER = `<p><code>setup.py</code> wraps the container so nobody has to remember the podman
 arguments. The same image runs under Docker.</p>
 <table>
   <thead>
@@ -114,22 +81,21 @@ arguments. The same image runs under Docker.</p>
   </thead>
   <tbody>
       <tr><td><code>./setup.py up</code></td><td>Build if needed, start, wait until healthy, load the example tables, print a dbt profile.</td></tr>
-      <tr><td><code>./setup.py redeploy</code></td><td>Down, clear staged files, rebuild, up. Use it after a code change.</td></tr>
+      <tr><td><code>./setup.py redeploy</code></td><td>Down, clear staged files, rebuild, up. The data volume is kept. Use it after a code change.</td></tr>
       <tr><td><code>./setup.py status</code></td><td>Container state and the health endpoint.</td></tr>
       <tr><td><code>./setup.py logs</code></td><td>Server log, for a container that will not start.</td></tr>
       <tr><td><code>./setup.py reset</code></td><td>Drop all data, persisted files included, and recreate the catalog.</td></tr>
-      <tr><td><code>./setup.py down</code></td><td>Stop and remove the container; the stage directory stays.</td></tr>
+      <tr><td><code>./setup.py down</code></td><td>Stop and remove the container; the data volume and stage directory stay.</td></tr>
   </tbody>
 </table>
-<p class="muted">Worth knowing: <code>--port</code>, <code>--network</code>,
-<code>--stage-root</code>, <code>--public-key</code>, <code>--users</code>,
-<code>--env KEY=VALUE</code> (for example <code>--env SNOWTEST_DATA_DIR=/var/lib/snowtest/data</code>),
-<code>--no-seed-examples</code>, <code>--recreate</code>, <code>--rebuild</code>,
-<code>--write-profile DIR</code>. Invalid names and ports are refused.
-The full list is <code>./setup.py up --help</code>.</p>
+<p class="muted">Worth knowing: <code>--name</code> (default <code>snowtest</code>; also names the
+<code>&lt;name&gt;-data</code> volume and the <code>.snowtest/&lt;name&gt;/stages</code> directory),
+<code>--port</code>, <code>--network</code>, <code>--no-persist</code>, <code>--public-key</code>,
+<code>--users</code>, <code>--env KEY=VALUE</code>, <code>--no-seed-examples</code>,
+<code>--recreate</code>, <code>--write-profile DIR</code>. Invalid names and ports are refused.
+The full list is <code>./setup.py up --help</code>.</p>`;
 
-<h2 id="control-plane">Control plane</h2>
-<table>
+const CONTROL_PLANE = `<table>
   <thead>
     <tr><th scope="col">Endpoint</th><th scope="col">Purpose</th></tr>
   </thead>
@@ -142,10 +108,9 @@ The full list is <code>./setup.py up --help</code>.</p>
 </table>
 <pre><code>curl -s -X POST 'http://localhost:3030/_snowtest/seed' \\
   -H 'Content-Type: application/json' \\
-  -d '{"sql":"create schema if not exists SNOWTEST.FIXTURES; create table SNOWTEST.FIXTURES.T (n int)"}'</code></pre>
+  -d '{"sql":"create schema if not exists SNOWTEST.FIXTURES; create table SNOWTEST.FIXTURES.T (n int)"}'</code></pre>`;
 
-<h2 id="staging">Staged files</h2>
-<p>
+const STAGING = `<p>
   Stages are backed by a directory on the server, and the client copies the bytes
   itself: the connector is handed a <code>file://</code> path instead of a presigned
   URL. That is what makes <code>PUT</code> and <code>GET</code> work with no object
@@ -160,25 +125,55 @@ COPY INTO ORDERS FROM @MY_STAGE FILE_FORMAT = (TYPE = CSV SKIP_HEADER = 1)
 GET @MY_STAGE/orders.csv file:///srv/data/back/</code></pre>
 <p class="muted">Internal stages only: <code>@~</code> and <code>@%table</code> are not
 implemented. <code>LIST</code>, <code>REMOVE</code> and <code>COPY INTO</code> treat a
-directory-style prefix as the stage root itself.</p>
+directory-style prefix as the stage root itself.</p>`;
 
-<h2 id="troubleshooting">Troubleshooting</h2>
+/** The page served at `/configuration` (`/usage` redirects here). */
+export function renderConfiguration(version: string): string {
+  // Panel ids keep the old `/usage#…` anchors working through the redirect.
+  const tabs = renderTabs(
+    [
+      { id: 'configuration', label: 'Flags', html: pane('Flags and environment', FLAGS) },
+      { id: 'launcher', label: 'Launcher', html: pane('Launcher', LAUNCHER) },
+      { id: 'control-plane', label: 'Control plane', html: pane('Control plane', CONTROL_PLANE) },
+      { id: 'staging', label: 'Stages', title: 'Staged files', html: pane('Staged files', STAGING) },
+    ],
+    { hash: true, variant: 'dense' },
+  );
+
+  const body = `<h1>Configuration</h1>
+<p class="lede">
+  How this process is configured. The flags and defaults below are the ones built
+  into the version you are talking to, so this page cannot describe a build older
+  than the one serving it.
+</p>
+
+<div class="ops">
+${tabs}
+</div>`;
+
+  return renderPage({ title: 'snowtest — configuration', body, version, nav: 'configuration' });
+}
+
+/** The page served at `/troubleshooting`. */
+export function renderTroubleshooting(version: string): string {
+  const rows = TROUBLESHOOTING.map(
+    ([symptom, fix], index) =>
+      `      <tr><td class="rn">${index + 1}</td><td>${inlineMarkup(symptom)}</td><td>${inlineMarkup(fix)}</td></tr>`,
+  ).join('\n');
+
+  const body = `<h1>Troubleshooting</h1>
+<p class="lede">Symptoms you are likely to hit, what causes them, and the fix.</p>
+
+<div class="ops">
 <table>
   <thead>
-    <tr><th scope="col">Symptom</th><th scope="col">Cause and fix</th></tr>
+    <tr><th scope="col" class="rn">#</th><th scope="col">Symptom</th><th scope="col">Cause and fix</th></tr>
   </thead>
   <tbody>
-${troubleshooting}
+${rows}
   </tbody>
 </table>
-  </main>
-</div>
+</div>`;
 
-<footer>
-  What the server answers is at <a href="/operations">/operations</a>, including the
-  list of things it does not support. Installing it and connecting for the first time
-  is in the repository's README.
-</footer>`;
-
-  return renderPage({ title: 'snowtest — usage', body, bodyClass: 'wide' });
+  return renderPage({ title: 'snowtest — troubleshooting', body, version, nav: 'troubleshooting' });
 }
