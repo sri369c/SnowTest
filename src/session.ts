@@ -60,6 +60,8 @@ export class Session {
   readonly clientAppId: string;
   readonly clientAppVersion: string;
   readonly createdAt = new Date();
+  /** Refreshed whenever the session runs a statement; drives idle expiry. */
+  lastUsedAt = new Date();
   readonly parameters: Map<string, string>;
   readonly catalog: Catalog;
 
@@ -98,6 +100,9 @@ export class Session {
   }
 }
 
+/** Matches the 3600s `validityInSeconds` a login response advertises. */
+export const SESSION_IDLE_MS = 60 * 60 * 1000;
+
 export class SessionRegistry {
   private readonly byToken = new Map<string, Session>();
   private nextId = 1;
@@ -111,9 +116,25 @@ export class SessionRegistry {
     return this.nextId++;
   }
 
+  /** Undefined for an unknown or idle-expired token, as Snowflake treats a dead session. */
   get(token: string | null | undefined): Session | undefined {
     if (!token) return undefined;
-    return this.byToken.get(token);
+    const session = this.byToken.get(token);
+    if (!session) return undefined;
+    if (Date.now() - session.lastUsedAt.getTime() > SESSION_IDLE_MS) return undefined;
+    return session;
+  }
+
+  /** Remove sessions idle past the TTL and hand them back so their connections can be closed. */
+  sweep(now = Date.now()): Session[] {
+    const idle: Session[] = [];
+    for (const [token, session] of this.byToken) {
+      if (now - session.lastUsedAt.getTime() > SESSION_IDLE_MS) {
+        this.byToken.delete(token);
+        idle.push(session);
+      }
+    }
+    return idle;
   }
 
   delete(token: string): Session | undefined {

@@ -42,6 +42,8 @@ USER node
 EXPOSE 8080
 
 # Uses Node's built-in fetch, so the image needs no curl or wget.
+# OCI images drop HEALTHCHECK: build with `podman build --format docker` (or
+# `docker build`) for this to be recorded.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=5 \
   CMD node -e "fetch('http://127.0.0.1:' + (process.env.SNOWTEST_PORT || 8080) + '/_snowtest/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 

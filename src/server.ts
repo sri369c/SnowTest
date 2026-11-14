@@ -19,7 +19,14 @@ import { Hono, type Context } from 'hono';
 import { Catalog, normalizeName } from './catalog.js';
 import { loadConfig, type SnowtestConfig } from './config.js';
 import { Engine, quoteIdent, type EngineConnection } from './engine.js';
-import { SnowflakeError, authError, loginObjectNotFound, mapEngineError, sessionExpired } from './errors.js';
+import {
+  SnowflakeError,
+  authError,
+  loginObjectNotFound,
+  mapEngineError,
+  protocolError,
+  sessionExpired,
+} from './errors.js';
 import {
   PREVIEW_LIMIT,
   renderMissing,
@@ -150,14 +157,17 @@ function createJwtVerifier(publicKeyPem: string | null): ((token: string) => Tok
     }
     if (!valid) return { ok: false, reason: 'signature verification failed' };
 
-    if (typeof payload.exp === 'number' && payload.exp * 1000 < Date.now()) {
-      return { ok: false, reason: 'token expired' };
+    // Both claims are required: Snowflake rejects a JWT without `exp`, and without
+    // `iss` it cannot tell which account and user signed it.
+    if (typeof payload.exp !== 'number' || payload.exp * 1000 < Date.now()) {
+      return { ok: false, reason: 'token expired or missing exp' };
     }
 
     // Snowflake's issuer is `ACCOUNT.USER.SHA256:<fingerprint>`.
     const issuer = typeof payload.iss === 'string' ? payload.iss : '';
     const user = issuer.includes('.') ? issuer.split('.')[1] : undefined;
-    return { ok: true, ...(user ? { user } : {}) };
+    if (!user) return { ok: false, reason: 'issuer is missing the account and user' };
+    return { ok: true, user };
   };
 }
 
@@ -219,12 +229,23 @@ function errorStatus(error: SnowflakeError): 400 | 401 | 404 | 422 {
   return 422;
 }
 
-async function readJson(context: Context): Promise<Record<string, unknown>> {
+/** Drivers gzip their bodies; cap both the bytes received and the bytes decoded. */
+const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
+const MAX_DECODED_BYTES = 128 * 1024 * 1024;
+
+type ParsedJson = { ok: true; body: Record<string, unknown> } | { ok: false };
+
+async function readJson(context: Context): Promise<ParsedJson> {
   try {
     const body = await context.req.json();
-    return body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+    return {
+      ok: true,
+      body: body && typeof body === 'object' ? (body as Record<string, unknown>) : {},
+    };
   } catch {
-    return {};
+    // An unparseable body is a client error, not an empty one: reporting it as
+    // empty turns every missing field into the wrong diagnosis.
+    return { ok: false };
   }
 }
 
@@ -255,7 +276,44 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
   >();
   const sessions = new SessionRegistry();
-  const router = new StatementRouter(engine, catalog, new StageStore(), dataDir);
+  const router = new StatementRouter(engine, catalog, new StageStore(), dataDir, (database) => {
+    // Dropping a database invalidates every session's context, not just the caller's.
+    for (const session of sessions.all()) {
+      if (session.database === database) {
+        session.database = null;
+        session.schema = null;
+      }
+    }
+  });
+
+  // Statement handles and query records are caches, not history: keep them bounded
+  // so a long-lived server cannot grow without limit. Map iteration is insert order.
+  const MAX_STATEMENTS = 256;
+  const MAX_QUERY_RECORDS = 1024;
+  const STATEMENT_RETENTION_MS = 24 * 60 * 60 * 1000;
+  let requests = 0;
+
+  const pruneOldest = <T>(map: Map<string, T>, max: number): void => {
+    while (map.size > max) {
+      const oldest = map.keys().next().value;
+      if (oldest === undefined) return;
+      map.delete(oldest);
+    }
+  };
+
+  const closeSession = (session: Session): void => {
+    const connection = session.connection as EngineConnection | null;
+    connection?.close();
+    session.connection = null;
+  };
+
+  /** Idle sessions hold a DuckDB connection open; expire them as Snowflake would. */
+  const sweepSessions = (): void => {
+    for (const idle of sessions.sweep()) {
+      log(`session expired session=${idle.id} user=${idle.user}`);
+      closeSession(idle);
+    }
+  };
 
   // Persisted databases come back first, so their schemas and stages can be restored.
   const persisted = dataDir ? await dataDir.databases() : [];
@@ -359,8 +417,8 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   // ever pasted into SQL; the resolved name is quoted before it is used.
   // ---------------------------------------------------------------------------
 
-  const countRows = async (target: string): Promise<number | null> => {
-    const connection = await engine.newConnection();
+  /** Row count for one table; the caller reuses a single connection for the page. */
+  const countRows = async (connection: EngineConnection, target: string): Promise<number | null> => {
     try {
       const result = await connection.execute(`SELECT count(*) FROM ${target}`);
       return Number(result.rows[0]?.[0] ?? 0);
@@ -368,8 +426,6 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       // A view over a dropped table, or a type count() cannot handle: show no
       // number rather than failing the whole list.
       return null;
-    } finally {
-      connection.close();
     }
   };
 
@@ -384,14 +440,21 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
     const objects = await engine.listTables(database, schema);
     const tables: BrowseTable[] = [];
-    for (const object of objects) {
-      tables.push({
-        name: object.name,
-        kind: object.kind,
-        rows: await countRows(
-          `${quoteIdent(database)}.${quoteIdent(schema)}.${quoteIdent(object.name)}`,
-        ),
-      });
+    // One connection for the whole page: one per table meant N connections per load.
+    const connection = await engine.newConnection();
+    try {
+      for (const object of objects) {
+        tables.push({
+          name: object.name,
+          kind: object.kind,
+          rows: await countRows(
+            connection,
+            `${quoteIdent(database)}.${quoteIdent(schema)}.${quoteIdent(object.name)}`,
+          ),
+        });
+      }
+    } finally {
+      connection.close();
     }
     return c.html(renderSchema(database, schema, tables));
   });
@@ -476,7 +539,9 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   );
 
   app.post('/_snowtest/seed', async (c) => {
-    const body = await readJson(c);
+    const parsed = await readJson(c);
+    if (!parsed.ok) return c.json({ error: 'Request body must be JSON.' }, 400);
+    const body = parsed.body;
     const sql = typeof body.sql === 'string' ? body.sql : '';
     if (!sql) return c.json({ error: 'Provide {"sql": "<statements>"}' }, 400);
 
@@ -499,15 +564,13 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       await router.execute(trimmed, session);
       executed += 1;
     }
+    // Seeding runs on its own session, so its connection is this handler's to close.
+    closeSession(session);
     return c.json({ executed });
   });
 
   app.post('/_snowtest/reset', async (c) => {
-    for (const session of sessions.all()) {
-      const connection = session.connection as EngineConnection | null;
-      connection?.close();
-      session.connection = null;
-    }
+    for (const session of sessions.all()) closeSession(session);
     for (const database of [...catalog.databases.keys()]) {
       await engine.detachDatabase(database);
     }
@@ -641,7 +704,12 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   };
 
   app.post('/session/v1/login-request', async (c) => {
-    const body = await readJson(c);
+    const parsed = await readJson(c);
+    if (!parsed.ok) {
+      return c.json(driverErrorResponse(protocolError('Request body is not valid JSON.')), 400);
+    }
+    const body = parsed.body;
+    sweepSessions();
     const nested = body.data;
     const data = (nested && typeof nested === 'object' ? nested : body) as Record<string, unknown>;
     const user = String(data.LOGIN_NAME ?? data.loginName ?? 'SNOWTEST_USER');
@@ -701,9 +769,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       const session = sessions.delete(token);
       if (session) {
         log(`logout session=${session.id} user=${session.user}`);
-        const connection = session.connection as EngineConnection | null;
-        connection?.close();
-        session.connection = null;
+        closeSession(session);
       }
     }
     return c.json(successEnvelope(null));
@@ -712,7 +778,11 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   app.get('/session', (c) => {
     const token = bearerToken(c.req.header('authorization'));
     const session = token ? sessions.delete(token) : undefined;
-    if (session) log(`logout session=${session.id} user=${session.user}`);
+    if (session) {
+      log(`logout session=${session.id} user=${session.user}`);
+      // GET logout releases the connection too; otherwise every driver logout leaks one.
+      closeSession(session);
+    }
     return c.json(successEnvelope(null));
   });
 
@@ -729,7 +799,11 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       return c.json(driverErrorResponse(sessionExpired()));
     }
 
-    const body = await readJson(c);
+    const parsed = await readJson(c);
+    if (!parsed.ok) {
+      return c.json(driverErrorResponse(protocolError('Request body is not valid JSON.')), 400);
+    }
+    const body = parsed.body;
     const sql = String(body.sqlText ?? '');
     const describeOnly = body.describeOnly === true;
     const queryId = randomUUID();
@@ -775,11 +849,13 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         state: 'SUCCESS',
         errorMessage: null,
       });
+      pruneOldest(queryLog, MAX_QUERY_RECORDS);
 
       // Async submissions must advertise where the result can be polled;
       // the connector refuses to fall back to an inline rowset here.
       if (body.asyncExec === true) {
         asyncResults.set(queryId, { outcome, session });
+        pruneOldest(asyncResults, MAX_QUERY_RECORDS);
         return c.json({
           success: true,
           data: {
@@ -808,6 +884,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         state: 'FAILED',
         errorMessage: failure.message,
       });
+      pruneOldest(queryLog, MAX_QUERY_RECORDS);
       return c.json(driverErrorResponse(failure));
     }
   });
@@ -889,7 +966,11 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       );
     }
 
-    const body = await readJson(c);
+    const parsed = await readJson(c);
+    if (!parsed.ok) {
+      return c.json(sqlApiErrorBody(protocolError('Request body is not valid JSON.')), 400);
+    }
+    const body = parsed.body;
     const statement = String(body.statement ?? '').trim();
     if (!statement) {
       return c.json(
@@ -955,6 +1036,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         createdAt: Date.now(),
         consumed: false,
       });
+      pruneOldest(statements, MAX_STATEMENTS);
 
       if (asynchronous) {
         return c.json(
@@ -973,6 +1055,11 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       const failure = mapEngineError(error);
       logQuery('api', session, startedAt, statement, failure);
       return c.json(sqlApiErrorBody(failure, statementHandle), errorStatus(failure));
+    } finally {
+      // The handle keeps this session's metadata, never its connection: leaving it
+      // open leaks one connection per statement and, on Windows, keeps the
+      // database files locked after the server closes.
+      closeSession(session);
     }
   };
 
@@ -981,6 +1068,16 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   app.get('/api/v2/statements/:handle', (c) => {
     const handle = c.req.param('handle');
     const stored = statements.get(handle);
+    if (stored && Date.now() - stored.createdAt > STATEMENT_RETENTION_MS) {
+      statements.delete(handle);
+      return c.json(
+        sqlApiErrorBody(
+          new SnowflakeError('000000', `Statement ${handle} has expired.`, '42000'),
+          handle,
+        ),
+        404,
+      );
+    }
     if (!stored) {
       return c.json(
         sqlApiErrorBody(
@@ -1019,9 +1116,21 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     config,
     async listen(port = config.port, host = config.host) {
       const handler = async (req: IncomingMessage, res: ServerResponse) => {
+        requests += 1;
+        if (requests % 64 === 0) sweepSessions();
         try {
           const chunks: Buffer[] = [];
-          for await (const chunk of req) chunks.push(chunk as Buffer);
+          let received = 0;
+          for await (const chunk of req) {
+            received += (chunk as Buffer).length;
+            // Refuse oversized bodies instead of buffering whatever arrives.
+            if (received > MAX_REQUEST_BYTES) {
+              res.writeHead(413, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ error: `Request body exceeds ${MAX_REQUEST_BYTES} bytes.` }));
+              return;
+            }
+            chunks.push(chunk as Buffer);
+          }
           let body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
 
           const url = `http://${req.headers.host ?? `${host}:${port}`}${req.url ?? '/'}`;
@@ -1037,8 +1146,10 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
           const encoding = String(req.headers['content-encoding'] ?? '').toLowerCase();
           if (body && body.length > 0 && encoding) {
             try {
-              if (encoding.includes('gzip')) body = gunzipSync(body);
-              else if (encoding.includes('deflate')) body = inflateSync(body);
+              // `maxOutputLength` stops a small compressed body expanding without
+              // bound on the event loop.
+              if (encoding.includes('gzip')) body = gunzipSync(body, { maxOutputLength: MAX_DECODED_BYTES });
+              else if (encoding.includes('deflate')) body = inflateSync(body, { maxOutputLength: MAX_DECODED_BYTES });
             } catch (error) {
               log(`error 400 ${req.method} ${req.url}: could not decode '${encoding}' body: ${String(error)}`);
               res.writeHead(400, { 'content-type': 'application/json' });
@@ -1093,11 +1204,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       };
     },
     async close() {
-      for (const session of sessions.all()) {
-        const connection = session.connection as EngineConnection | null;
-        connection?.close();
-        session.connection = null;
-      }
+      for (const session of sessions.all()) closeSession(session);
       await engine.close();
     },
   };

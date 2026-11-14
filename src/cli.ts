@@ -83,12 +83,37 @@ console.log(`snowtest ${PACKAGE_VERSION} listening on http://${running.host}:${r
 console.log(`  emulating Snowflake ${SERVER_VERSION}`);
 console.log(`  account=${config.account} default=${config.defaultDatabase}.${config.defaultSchema}`);
 
-const shutdown = async () => {
-  console.log('\nshutting down…');
-  await running.close();
-  await server.close();
-  process.exit(0);
+let shuttingDown = false;
+
+/** Exit non-zero when either half of the shutdown failed, so supervisors notice. */
+const shutdown = async (signal: string): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`\nshutting down (${signal})…`);
+  let failed = false;
+  const steps: Array<[string, () => Promise<void>]> = [
+    ['listener', () => running.close()],
+    ['engine', () => server.close()],
+  ];
+  for (const [what, close] of steps) {
+    try {
+      await close();
+    } catch (error) {
+      failed = true;
+      console.error(`could not close the ${what}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  process.exit(failed ? 1 : 0);
 };
 
-process.on('SIGINT', () => void shutdown());
-process.on('SIGTERM', () => void shutdown());
+// Consume the promise: dropping it with `void` would leave a rejection unhandled
+// and the process half-closed.
+const onSignal = (signal: string): void => {
+  shutdown(signal).catch((error: unknown) => {
+    console.error(`shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  });
+};
+
+process.on('SIGINT', () => onSignal('SIGINT'));
+process.on('SIGTERM', () => onSignal('SIGTERM'));
