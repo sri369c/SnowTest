@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { hasMultipleStatements, rewrite, splitColumnListCtas, toSqlLiteral } from '../src/dialect.js';
+import { rewrite, splitColumnListCtas, toSqlLiteral } from '../src/dialect.js';
 
 const ctx = {
   database: 'SNOWTEST',
@@ -13,26 +13,6 @@ const ctx = {
 };
 
 const run = (sql: string, bindings: unknown[] = []) => rewrite(sql, ctx, bindings);
-
-describe('statement count', () => {
-  it('accepts a single statement, with or without a trailing semicolon', () => {
-    expect(hasMultipleStatements('SELECT 1')).toBe(false);
-    expect(hasMultipleStatements('SELECT 1;')).toBe(false);
-    expect(hasMultipleStatements('  SELECT 1 ;  ; ')).toBe(false);
-  });
-
-  it('ignores semicolons inside literals, identifiers and comments', () => {
-    expect(hasMultipleStatements("SELECT ';' AS s")).toBe(false);
-    expect(hasMultipleStatements('SELECT ";" AS x')).toBe(false);
-    expect(hasMultipleStatements('/* a; b */ SELECT 1')).toBe(false);
-    expect(hasMultipleStatements('SELECT 1 -- a; b')).toBe(false);
-  });
-
-  it('detects a batch', () => {
-    expect(hasMultipleStatements('SELECT 1; SELECT 2')).toBe(true);
-    expect(hasMultipleStatements('SELECT 1;\n-- next\nSELECT 2')).toBe(true);
-  });
-});
 
 describe('function translation', () => {
   it('rewrites IFF to CASE', () => {

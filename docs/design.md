@@ -5,10 +5,11 @@
 A Snowflake-compatible stub server for testing systems that expect a real
 Snowflake account. This document explains **what was built, why it is shaped
 this way, and where the sharp edges are**. For commands, see the README and the
-running server's `/usage` page.
+running server's `/configuration` page.
 
-- **Status:** working, verified against `snowflake-connector-python` 3.16, 4.8
-  and 5.1, dbt 1.12 over key-pair and password auth.
+- **Status:** working; `snowflake-connector-python` 5.1 is pinned in the test
+  suite, 3.16 and 4.8 were checked manually; `dbt-core` 1.12 / `dbt-snowflake`
+  1.12 over key-pair and password auth.
 - **Not** a Snowflake replacement: no warehouses, no privileges, no cloud
   storage, no multi-node behaviour.
 
@@ -23,7 +24,7 @@ cost:
 | Surface | Consumer | Why it matters |
 |---|---|---|
 | SQL REST API v2 | curl, HTTP integrations, custom services | documented, cheap to implement |
-| Driver protocol (undocumented) | `snowflake-connector-python`, dbt, Snowpark, JDBC-style clients | the one that matters: point dbt at `localhost` and it believes it is talking to Snowflake |
+| Driver protocol (undocumented) | `snowflake-connector-python`, `dbt-snowflake`, Snowpark, JDBC-style clients | the one that matters: point dbt at `localhost` and it believes it is talking to Snowflake |
 | ODBC | Power BI, Excel, Tableau | native C driver, own encoding — out of scope |
 
 A stub that only *pattern-matches* SQL is useless the moment a test writes real
@@ -38,7 +39,7 @@ the statements.**
 flowchart LR
   subgraph clients[Clients under test]
     PY["snowflake-connector-python"]
-    DBT["dbt"]
+    DBT["dbt-snowflake"]
     RAW["curl / SQL API clients"]
   end
 
@@ -78,20 +79,34 @@ handled in one place (`src/types.ts`).
 ### Layout
 
 ```
-src/server.ts    HTTP routes, gzip decoding, request/response plumbing
-src/meta.ts      statement router: metadata/side-effecting SQL vs DuckDB
-src/dialect.ts   Snowflake → DuckDB translation
-src/engine.ts    DuckDB instance, per-session connections, catalog introspection
-src/persist.ts   SNOWTEST_DATA_DIR: one DuckDB file per database, stage definitions
-src/types.ts     type mapping + per-surface row encoding
-src/protocol.ts  response envelopes (driver vs SQL API v2)
-src/home.ts      landing page at / (connection details, live catalog state)
-src/stage.ts     stage directories on disk (PUT/GET/LIST/COPY INTO backing)
-src/catalog.ts   databases, schemas, warehouses, roles, stages
-src/session.ts   per-connection session state and parameters
-src/errors.ts    Snowflake-shaped errors (code + SQLSTATE + kind)
-src/config.ts    flags and environment
-src/cli.ts       entry point
+src/server.ts      HTTP routes, gzip decoding, request/response plumbing
+src/meta.ts        statement router: metadata/side-effecting SQL vs DuckDB
+src/dialect.ts     Snowflake → DuckDB translation
+src/engine.ts      DuckDB instance, per-session connections, catalog introspection
+src/persist.ts     SNOWTEST_DATA_DIR: one DuckDB file per database, stage definitions
+src/types.ts       type mapping + per-surface row encoding
+src/protocol.ts    response envelopes (driver vs SQL API v2)
+src/home.ts        landing page at / (connection details, live catalog state)
+src/operations.ts  supported-operations reference at /operations, from data
+src/usage.ts       /configuration and /troubleshooting pages
+src/browse.ts      catalog browser at /browse
+src/page.ts        shared HTML shell and stylesheet
+src/stage.ts       stage directories on disk (PUT/GET/LIST/COPY INTO backing)
+src/catalog.ts     databases, schemas, warehouses, roles, stages
+src/session.ts     per-connection session state and parameters
+src/errors.ts      Snowflake-shaped errors (code + SQLSTATE + kind)
+src/options.ts     flags and environment, shared by --help and /configuration
+src/config.ts      defaults and environment resolution
+src/version.ts     snowtest's own version, read from package.json
+src/cli.ts         entry point
+setup.py           container lifecycle: up, redeploy, down, status, logs, reset, build
+compose.yaml       container service definition
+Dockerfile         container image build
+data/              sample dataset (examples.sql)
+tests/             vitest units, Python connector suite, dbt suite
+scripts/           debugging helpers
+docs/              this document
+.snowtest/         per-instance stage directories created by setup.py
 ```
 
 ---
@@ -134,7 +149,7 @@ catalog. They are read back from `duckdb_tables()`, `duckdb_views()` and
 ```mermaid
 sequenceDiagram
   autonumber
-  participant M as dbt
+  participant M as dbt-snowflake
   participant CF as connector
   participant S as snowtest
   participant E as DuckDB
@@ -354,7 +369,13 @@ Consequences, stated plainly:
   therefore accept a directory-style prefix for a flat file.
 - **No encryption, no presigned URLs.** Blobs are plain files.
 - Each stage owns a directory under `SNOWTEST_STAGE_ROOT`; the default is a
-  process-scoped temp directory, so a restart starts clean.
+  process-scoped temp directory.
+- Without `SNOWTEST_DATA_DIR`, stage definitions live only in the in-memory
+  catalog, so a restart starts with no stages.
+- With `SNOWTEST_DATA_DIR`, stage definitions (database, schema, name, URL) are
+  restored from `stages.json` at startup and each gets its directory under
+  `SNOWTEST_STAGE_ROOT` back. Files are not persisted by snowtest: a stage holds
+  whatever that directory still contains (nothing, with the default temp root).
 
 `COPY INTO` loads CSV, JSON and Parquet through DuckDB's readers. `COPY INTO
 @stage FROM table` (unload) is not implemented.
@@ -363,7 +384,7 @@ Consequences, stated plainly:
 
 ## 10. dbt compatibility
 
-Supported and verified (dbt 1.12.6): `dbt debug`,
+Supported and verified (dbt-core 1.12.6, dbt-snowflake 1.12.4): `dbt debug`,
 `dbt seed`, `dbt run` (view; table with `transient`, `copy_grants`,
 `cluster_by`, `automatic_clustering`; incremental `merge`, `delete+insert`,
 `append`; `contract: enforced`), `dbt snapshot` (`timestamp` and `check`),
@@ -398,13 +419,13 @@ about it:
 
 ## 11. Verification strategy
 
-The only trustworthy oracle is the real client. Three suites, each pinning what
-it depends on:
+The only trustworthy oracle is the real client. Three suites; the Python suites
+pin connector 5.1, and connector 3.16 and 4.8 were checked manually:
 
 ```mermaid
 flowchart LR
   A["npm test<br/>vitest"] --> A1["dialect rules, engine behaviour,<br/>persistence, config, pages"]
-  B["npm run test:py"] --> B1["connector 4.8 / 5.1<br/>handshake, types, errors"]
+  B["npm run test:py"] --> B1["connector 5.1 (pinned)<br/>handshake, types, errors"]
   C["npm run test:dbt"] --> C1["dbt 1.12 + key-pair<br/>debug, run x2, seed x2, test"]
   C --> C2["verify.py<br/>results + wrong-key rejection"]
   C --> C3["stage_test.py<br/>PUT, LIST, COPY, GET, REMOVE"]
@@ -428,14 +449,12 @@ That produced two convincing but false failures during development.
 - **Not a security boundary.** Permissive by default; even in verified mode
   there is no user, role or privilege model, and no TLS.
 - In memory by default: data lives for the process lifetime unless
-  `SNOWTEST_DATA_DIR` is set. Persistence is opt-in; the launcher does not set
-  it.
-- Several `;`-separated statements in one request are refused with a
-  compilation error rather than run as a batch, because DuckDB would return one
-  result while routing followed the first statement.
-- Connector `execute_async` + `get_results_from_sfqid` is supported: results are
-  held in process memory and served through `RESULT_SCAN`. The SQL API v2 async
-  path (`?async=true`, then `GET /api/v2/statements/{handle}`) is too.
+  `SNOWTEST_DATA_DIR` is set (`setup.py` and `compose.yaml` set it).
+- Several `;`-separated statements in one request are not split: DuckDB runs
+  them all and returns one result; routing follows the first statement.
+- Connector `execute_async` + `get_results_from_sfqid` is not implemented. The
+  SQL API v2 async path (`?async=true`, then `GET /api/v2/statements/{handle}`)
+  is, and is tested.
 - No `COPY INTO @stage` (unload), no user (`@~`) or table (`@%table`) stages.
 - No UDFs, stored procedures, tasks, streams, dynamic tables, replication,
   Snowpark, Snowpipe Streaming, `PUT`/`GET` encryption.

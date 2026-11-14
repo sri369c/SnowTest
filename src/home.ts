@@ -14,8 +14,7 @@
 
 import type { SnowtestConfig } from './config.js';
 import { LANDING_SURFACES } from './operations.js';
-import { escapeHtml, renderPage } from './page.js';
-import { PACKAGE_VERSION } from './version.js';
+import { escapeHtml, renderPage, renderTabs } from './page.js';
 
 /** Catalog and session snapshot shown on the landing page. */
 export interface HomeSchemaState {
@@ -43,6 +42,39 @@ export interface HomeState {
   stages: number;
   sessions: HomeSessionState[];
 }
+
+const REFRESH_ICON =
+  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>';
+
+// Re-fetches `/` and swaps in its #live-body; a failure is shown, never left looking current.
+const LIVE_SCRIPT = `<script>
+(() => {
+  const button = document.getElementById('live-refresh');
+  const at = document.getElementById('live-at');
+  const stamp = () => { at.textContent = 'updated ' + new Date().toLocaleTimeString(); };
+  stamp();
+  button.addEventListener('click', async () => {
+    button.classList.add('busy');
+    button.classList.remove('err');
+    button.disabled = true;
+    try {
+      const response = await fetch('/', { cache: 'no-store' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const fresh = doc.getElementById('live-body');
+      if (!fresh) throw new Error('live section missing from response');
+      document.getElementById('live-body').replaceWith(fresh);
+      stamp();
+    } catch (error) {
+      button.classList.add('err');
+      at.textContent = 'refresh failed: ' + error.message;
+    } finally {
+      button.classList.remove('busy');
+      button.disabled = false;
+    }
+  });
+})();
+</script>`;
 
 export function renderHome(
   config: SnowtestConfig,
@@ -94,15 +126,7 @@ export function renderHome(
       `  <tr><th scope="row"><a href="/operations#${escapeHtml(surface.id)}">${escapeHtml(surface.label)}</a></th><td>${escapeHtml(surface.summary)} <span class="muted">(${surface.supported} of ${surface.total} supported)</span></td></tr>`,
   ).join('\n');
 
-  const body = `<span class="tag">snowtest ${escapeHtml(PACKAGE_VERSION)} &middot; emulating Snowflake ${escapeHtml(version)}</span>
-<h1>A Snowflake-compatible stub server</h1>
-<p class="lede">
-  Point a Snowflake client's host and port here and it answers the way Snowflake does —
-  no account, no warehouse cost, no network. Use it for integration tests, local
-  development and CI.
-</p>
-
-<div class="card">
+  const overview = `<div class="card">
   <table>
     <tr><th>Endpoint</th><td><code>${endpoint}</code></td></tr>
     <tr><th>Account</th><td><code>${account}</code></td></tr>
@@ -112,11 +136,25 @@ export function renderHome(
   </table>
 </div>
 
-<h2>Live state</h2>
+<h3>What it is not</h3>
+<p class="warn">
+  A test double, not a replacement. No TLS, no users, roles or privileges, no ODBC,
+  no warehouse sizing or cost behaviour, one result partition, JSON only. Staged
+  transfers use a local directory instead of cloud object storage.
+</p>
+<ul>
+  <li>Nothing here authenticates or authorises unless you configure a public key.</li>
+  <li>Never expose it publicly or point real credentials at it.</li>
+  <li>Data lives in memory unless <code>SNOWTEST_DATA_DIR</code> is set (<code>setup.py</code> and <code>compose.yaml</code> set it).</li>
+</ul>`;
+
+  // `live-body` is swapped in place by the refresh button; keep the id on the server-rendered copy.
+  const live = `<div class="livebar"><span class="muted" id="live-at" aria-live="polite"></span><button type="button" class="refresh" id="live-refresh" title="Refresh live state">${REFRESH_ICON}Refresh</button></div>
+<div id="live-body">
 <p class="muted">
   ${state.databases.length} database(s) &middot; ${objectCount} table/view(s) &middot;
   ${state.warehouses.length} warehouse(s) &middot; ${state.roles.length} role(s) &middot;
-  ${state.stages} stage(s) &middot; ${state.sessions.length} session(s). Reload to refresh.
+  ${state.stages} stage(s) &middot; ${state.sessions.length} session(s).
 </p>
 <table>
   <tr><th>Database</th><th>Schema</th><th>Tables</th><th>Views</th></tr>
@@ -129,9 +167,9 @@ ${databaseRows}
   <tr><th>User</th><th>Context</th><th>Role</th></tr>
 ${sessionRows}
 </table>
+</div>`;
 
-<h2>Connect with the Python connector</h2>
-<pre><code>import snowflake.connector
+  const python = `<pre><code>import snowflake.connector
 
 conn = snowflake.connector.connect(
     account="${account}", user="test", password="test",
@@ -140,11 +178,10 @@ conn = snowflake.connector.connect(
 )
 cur = conn.cursor()
 cur.execute("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()")
-print(cur.fetchall())</code></pre>
+print(cur.fetchall())</code></pre>`;
 
-<h2>Connect with dbt</h2>
-<p>Key-pair auth is the normal way a service account reaches Snowflake, so it is the
-normal way to reach this too. Add these keys to any dbt profile:</p>
+  const dbt = `<p>Key-pair auth is the normal way a service account reaches Snowflake, so it is the
+normal way to reach this too. Add these keys to any dbt-snowflake profile:</p>
 <pre><code>snowtest:
   target: dev
   outputs:
@@ -163,16 +200,14 @@ normal way to reach this too. Add these keys to any dbt profile:</p>
       port: ${port}
       protocol: http</code></pre>
 <p>Generated keys are only verified when the server was started with a public key
-(<code>SNOWTEST_JWT_PUBLIC_KEY</code>); otherwise any credential is accepted.</p>
+(<code>SNOWTEST_JWT_PUBLIC_KEY</code>); otherwise any credential is accepted.</p>`;
 
-<h2>Or just curl it</h2>
-<pre><code>curl -s -X POST '${endpoint}/api/v2/statements' \\
+  const curl = `<pre><code>curl -s -X POST '${endpoint}/api/v2/statements' \\
   -H 'Authorization: Bearer test' \\
   -H 'Content-Type: application/json' \\
-  -d '{"statement":"SELECT 1 AS n"}'</code></pre>
+  -d '{"statement":"SELECT 1 AS n"}'</code></pre>`;
 
-<h2>What it speaks</h2>
-<table>
+  const speaks = `<table>
   <thead>
     <tr><th scope="col">Surface</th><th scope="col">Notes</th></tr>
   </thead>
@@ -183,33 +218,42 @@ ${surfaceRows}
 <p>
   <a href="/operations"><strong>Supported operations</strong></a> &mdash;
   <span class="muted">every endpoint, statement and function, with what each one does and where it stops.</span>
-</p>
+</p>`;
 
-<h2>Control plane</h2>
-<table>
+  const control = `<table>
   <tr><th><code>GET /_snowtest/health</code></th><td>liveness probe</td></tr>
   <tr><th><code>GET /_snowtest/state</code></th><td>databases, schemas, warehouses, roles, stages, sessions</td></tr>
   <tr><th><code>POST /_snowtest/seed</code></th><td>run a SQL script: <code>{"sql": "..."}</code></td></tr>
   <tr><th><code>POST /_snowtest/reset</code></th><td>drop everything, persisted files included, and recreate the configured catalog</td></tr>
-</table>
+</table>`;
 
-<h2>What it is not</h2>
-<p class="warn">
-  A test double, not a replacement. No TLS, no users, roles or privileges, no ODBC,
-  no warehouse sizing or cost behaviour, one result partition, JSON only. Staged
-  transfers use a local directory instead of cloud object storage.
+  const connect = renderTabs(
+    [
+      { id: 'connect-python', label: 'Python', html: python },
+      { id: 'connect-dbt', label: 'dbt', html: dbt },
+      { id: 'connect-curl', label: 'curl', html: curl },
+    ],
+    { variant: 'sub' },
+  );
+
+  const body = `<h1>A Snowflake-compatible stub server</h1>
+<p class="lede">
+  Point a Snowflake client's host and port here and it answers the way Snowflake does —
+  no account, no warehouse cost, no network. Use it for integration tests, local
+  development and CI.
 </p>
-<ul>
-  <li>Nothing here authenticates or authorises unless you configure a public key.</li>
-  <li>Never expose it publicly or point real credentials at it.</li>
-  <li>Data lives in memory unless <code>SNOWTEST_DATA_DIR</code> is set. Persistence is opt-in: the launcher does not set it.</li>
-</ul>
 
-<footer>
-  <a href="/operations">Supported operations</a> &middot;
-  <a href="/usage">Usage and configuration</a>.
-  Both describe the build serving this page.
-</footer>`;
+${renderTabs(
+  [
+    { id: 'overview', label: 'Overview', html: overview },
+    { id: 'live', label: 'Live state', html: live },
+    { id: 'connect', label: 'Connect', html: connect },
+    { id: 'speaks', label: 'What it speaks', html: speaks },
+    { id: 'control', label: 'Control plane', html: control },
+  ],
+  { hash: true },
+)}
+${LIVE_SCRIPT}`;
 
-  return renderPage({ title: 'snowtest — Snowflake-compatible stub server', body });
+  return renderPage({ title: 'snowtest — Snowflake-compatible stub server', body, version, nav: 'home' });
 }

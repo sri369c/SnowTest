@@ -19,9 +19,16 @@ packages".
 Podman is preferred when both are installed; `--engine docker` forces Docker.
 Anything after `--` is appended to the server command line:
 
-    ./setup.py up -- --verbose --port 3030
+    ./setup.py up -- --verbose
 
-The stage directory (<repo>/.snowtest/stages by default) is bind-mounted at the
+Several instances can run side by side: `--name` (default `snowtest`) names
+the container and derives its data volume (`<name>-data`) and stage directory
+(`<repo>/.snowtest/<name>/stages`); give each its own `--port`.
+
+Data persists across restarts in the `<name>-data` volume
+(`SNOWTEST_DATA_DIR`); `--no-persist` keeps it in memory instead.
+
+The stage directory is bind-mounted at the
 *same absolute path* inside the container, so `PUT` / `GET` work with a client
 running on the host, which is what dbt does. On Windows the drive letter is
 dropped (C:\\x -> /x), so the client must run with the stage's drive current.
@@ -32,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -42,13 +50,18 @@ import urllib.request
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-CONTAINER = "snowtest"
+DEFAULT_NAME = "snowtest"
 CONTAINER_PORT = 3030
-DEFAULT_IMAGE = "snowtest:2.0.0"
+DEFAULT_PORT = 3030
+DEFAULT_IMAGE = "snowtest:3.0.0"
 DEFAULT_NETWORK = "snowtest-network"
+DATA_MOUNT = "/var/lib/snowtest/data"
 ACCOUNT = "SNOWTEST"
 DATABASE = "SNOWTEST"
 WAREHOUSE = "SNOWTEST_WH"
+
+# Container, network and volume names: what podman and docker both accept.
+NAME_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
 
 EXAMPLES_SQL = PROJECT_ROOT / "data" / "examples.sql"
 EXAMPLES_SCHEMA = f"{DATABASE}.EXAMPLES"
@@ -58,10 +71,12 @@ examples:
   ./setup.py up
   ./setup.py up --public-key keys/rsa_key.pub --users DBT_SVC
   ./setup.py up --port 9090 --write-profile ./dbt_project
+  ./setup.py up --name team-a --port 3131 --network team-a-net   # a second, isolated instance
+  ./setup.py up --no-persist         # in-memory: a restart is a clean slate
   ./setup.py up --dry-run            # print the podman commands, run nothing
   ./setup.py logs -f
   ./setup.py reset                   # clean slate between test runs
-  ./setup.py redeploy                # pick up code changes: down, reset, build, up
+  ./setup.py redeploy                # pick up code changes: down, clear stages, build, up (keeps data volume)
   ./setup.py up --no-seed-examples   # skip loading the bundled example tables
   ./setup.py down
 """
@@ -79,6 +94,25 @@ def die(message: str) -> "NoReturn":  # noqa: F821 - typing only
 
 def note(message: str) -> None:
     print(message)
+
+
+def engine_name(value: str) -> str:
+    """argparse type: a container, network or volume name."""
+    if not NAME_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            f"invalid name {value!r}: use letters, digits, '_', '.' or '-', starting with a letter or digit")
+    return value
+
+
+def port_number(value: str) -> int:
+    """argparse type: a TCP port."""
+    if not value.isdigit() or not 1 <= int(value) <= 65535:
+        raise argparse.ArgumentTypeError(f"invalid port {value!r}: expected 1-65535")
+    return int(value)
+
+
+def data_volume(args: argparse.Namespace) -> str:
+    return f"{args.name}-data"
 
 
 def run(
@@ -169,7 +203,7 @@ def stage_directory(args: argparse.Namespace) -> Path:
     if args.stage_root:
         path = Path(args.stage_root).expanduser()
     else:
-        path = PROJECT_ROOT / ".snowtest" / "stages"
+        path = PROJECT_ROOT / ".snowtest" / args.name / "stages"
     path = path.resolve()
     if not args.dry_run:
         path.mkdir(parents=True, exist_ok=True)
@@ -237,12 +271,12 @@ def image_present(engine: str, image: str, dry: bool) -> bool:
     return proc.returncode == 0
 
 
-def container_state(engine: str, dry: bool) -> str | None:
+def container_state(engine: str, args: argparse.Namespace) -> str | None:
     """'running', 'exited', ... or None when there is no such container."""
-    if dry:
+    if args.dry_run:
         return None
     proc = subprocess.run(
-        [engine, "inspect", "--format", "{{.State.Status}}", CONTAINER],
+        [engine, "inspect", "--format", "{{.State.Status}}", args.name],
         text=True,
         capture_output=True,
     )
@@ -255,25 +289,18 @@ def build_image(engine: str, image: str, args: argparse.Namespace,
                 *, no_cache: bool = False) -> None:
     note(f"building {image} with {engine}")
     cmd = [engine, "build", "-t", image]
-    # Podman defaults to the OCI format, which has nowhere to record a
-    # Dockerfile HEALTHCHECK; compose and CI then cannot wait for readiness.
-    if engine == "podman":
-        cmd.extend(["--format", "docker"])
     if no_cache:
         cmd.append("--no-cache")
     cmd.append(str(PROJECT_ROOT))
     run(cmd, dry=args.dry_run)
-    # Retagging leaves the previous image unnamed and unreferenced. Prune only
-    # those: without --all, a tagged image is never removed, even when unused.
-    run([engine, "image", "prune", "-f"], dry=args.dry_run, check=False)
 
 
 def remove_container(engine: str, args: argparse.Namespace) -> bool:
-    state = container_state(engine, args.dry_run)
+    state = container_state(engine, args)
     if state is None and not args.dry_run:
         return False
-    note(f"removing container {CONTAINER} (state: {state or 'unknown'})")
-    run([engine, "rm", "-f", CONTAINER], dry=args.dry_run, check=False)
+    note(f"removing container {args.name} (state: {state or 'unknown'})")
+    run([engine, "rm", "-f", args.name], dry=args.dry_run, check=False)
     return True
 
 
@@ -293,7 +320,7 @@ def create_container(engine: str, args: argparse.Namespace, stage: Path) -> None
     ensure_network(engine, args)
     cmd = [
         engine, "run", "-d",
-        "--name", CONTAINER,
+        "--name", args.name,
         "--network", args.network,
         "--restart", "unless-stopped",
         "-p", f"{args.port}:{CONTAINER_PORT}",
@@ -301,6 +328,9 @@ def create_container(engine: str, args: argparse.Namespace, stage: Path) -> None
         "-e", f"SNOWTEST_STAGE_ROOT={container_path(stage)}",
         *bind(stage, container_path(stage), args),
     ]
+    if args.persist:
+        # Named volume: created on first use, kept by `down` and `redeploy`.
+        cmd += ["-v", f"{data_volume(args)}:{DATA_MOUNT}", "-e", f"SNOWTEST_DATA_DIR={DATA_MOUNT}"]
     # Rootless podman: map the image's `node` user (uid/gid 1000) onto the
     # invoking user, so files written into the bind-mounted stage dir are ours.
     if engine == "podman" and args.userns in ("auto", "keep-id"):
@@ -414,9 +444,13 @@ def print_summary(args: argparse.Namespace, stage: Path, health: dict) -> None:
     note("")
     note(f"snowtest is up.  (health: {health.get('status', '?')})")
     note("")
-    note(f"  endpoint   {base_url(args)}  (http://{CONTAINER}:{CONTAINER_PORT} on {args.network})")
+    note(f"  endpoint   {base_url(args)}  (http://{args.name}:{CONTAINER_PORT} on {args.network})")
     note(f"  account    {ACCOUNT}   database {DATABASE}   warehouse {WAREHOUSE}")
     note(f"  stages     {stage}  (bind-mounted at {container_path(stage)} inside)")
+    if args.persist:
+        note(f"  data       volume {data_volume(args)} at {DATA_MOUNT} (survives restarts)")
+    else:
+        note("  data       in memory (a restart is a clean slate)")
     if args.public_key:
         note("  auth       key-pair, signatures verified")
     else:
@@ -442,9 +476,9 @@ def cmd_up(args: argparse.Namespace) -> int:
     if args.rebuild or not image_present(engine, args.image, args.dry_run):
         build_image(engine, args.image, args)
 
-    state = container_state(engine, args.dry_run)
+    state = container_state(engine, args)
     if state == "running" and not args.recreate:
-        note(f"container {CONTAINER} is already running; probing it (use --recreate to restart)")
+        note(f"container {args.name} is already running; probing it (use --recreate to restart)")
         health = wait_for_health(args)
         seed_examples(args)
         print_summary(args, stage, health)
@@ -466,9 +500,9 @@ def cmd_redeploy(args: argparse.Namespace) -> int:
     engine = resolve_engine(args.engine, args.dry_run)
     stage = stage_directory(args)
 
-    state = container_state(engine, args.dry_run)
+    state = container_state(engine, args)
     if state is None and not args.dry_run:
-        note(f"no container named {CONTAINER}; nothing to take down")
+        note(f"no container named {args.name}; nothing to take down")
     else:
         remove_container(engine, args)
 
@@ -480,7 +514,10 @@ def cmd_redeploy(args: argparse.Namespace) -> int:
     build_image(engine, args.image, args, no_cache=args.no_cache)
     create_container(engine, args, stage)
     health = wait_for_health(args)
-    note("the catalog is in memory, so this instance starts empty")
+    if args.persist:
+        note(f"data volume {data_volume(args)} is kept; ./setup.py reset clears it")
+    else:
+        note("the catalog is in memory, so this instance starts empty")
     seed_examples(args)
     print_summary(args, stage, health)
     maybe_write_profile(args)
@@ -490,9 +527,10 @@ def cmd_redeploy(args: argparse.Namespace) -> int:
 def cmd_down(args: argparse.Namespace) -> int:
     engine = resolve_engine(args.engine, args.dry_run)
     if not remove_container(engine, args):
-        note(f"no container named {CONTAINER}")
+        note(f"no container named {args.name}")
     else:
         note("stage files are kept; delete the stage directory if you want them gone")
+        note(f"the data volume is kept too; `{engine} volume rm {data_volume(args)}` deletes it")
     return 0
 
 
@@ -501,12 +539,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     engine = next((name for name in candidates if shutil.which(name)), None)
 
     if engine:
-        state = container_state(engine, False)
+        state = container_state(engine, args)
         note(f"engine     {engine}")
-        note(f"container  {CONTAINER}: {state or 'not created'}")
+        note(f"container  {args.name}: {state or 'not created'}")
         if state:
             ports = subprocess.run(
-                [engine, "port", CONTAINER],
+                [engine, "port", args.name],
                 text=True, capture_output=True,
             ).stdout.strip()
             if ports:
@@ -529,7 +567,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
     cmd = [engine, "logs", "--tail", str(args.tail)]
     if args.follow:
         cmd.append("-f")
-    cmd.append(CONTAINER)
+    cmd.append(args.name)
     run(cmd, dry=args.dry_run)
     return 0
 
@@ -562,11 +600,17 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--engine", choices=("auto", "podman", "docker"), default="auto",
                         help="container engine; auto prefers podman (default: auto)")
     parser.add_argument("--image", default=DEFAULT_IMAGE, help=f"image tag (default: {DEFAULT_IMAGE})")
-    parser.add_argument("--port", type=int, default=3030, help="host port to publish (default: 3030)")
-    parser.add_argument("--network", default=DEFAULT_NETWORK,
+    parser.add_argument("--name", type=engine_name, default=DEFAULT_NAME,
+                        help=f"container name; also names the data volume <name>-data and the stage "
+                             f"directory .snowtest/<name>/stages (default: {DEFAULT_NAME})")
+    parser.add_argument("--port", type=port_number, default=DEFAULT_PORT,
+                        help=f"host port to publish (default: {DEFAULT_PORT})")
+    parser.add_argument("--network", type=engine_name, default=DEFAULT_NETWORK,
                         help=f"container network to join (default: {DEFAULT_NETWORK})")
+    parser.add_argument("--persist", action=argparse.BooleanOptionalAction, default=True,
+                        help="keep data in the <name>-data volume across restarts (default: on)")
     parser.add_argument("--stage-root", default=None,
-                        help="host directory for stage files (default: <repo>/.snowtest/stages)")
+                        help="host directory for stage files (default: <repo>/.snowtest/<name>/stages)")
     parser.add_argument("--public-key", default=None,
                         help="PEM public key; enables verified key-pair login")
     parser.add_argument("--users", default=None,
@@ -609,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     redeploy = sub.add_parser(
         "redeploy",
-        help="take down, reset staged files, rebuild the image, start again",
+        help="take down, clear staged files, rebuild the image, start again (keeps the data volume)",
     )
     add_common(redeploy)
     redeploy.add_argument("--no-cache", action="store_true", help="ignore the build cache")

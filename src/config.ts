@@ -33,7 +33,7 @@ export interface SnowtestConfig {
   dataDir: string | null;
 }
 
-/** Baseline values; `--help` and the `/usage` page render these as the defaults. */
+/** Baseline values; `--help` and the `/configuration` page render these as the defaults. */
 export const DEFAULTS: SnowtestConfig = {
   port: 8080,
   host: '0.0.0.0',

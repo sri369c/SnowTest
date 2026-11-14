@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { DEFAULTS } from '../src/config.js';
 import { ENV_ONLY, OPTIONS, helpText } from '../src/options.js';
-import { renderUsage } from '../src/usage.js';
+import { renderConfiguration, renderTroubleshooting } from '../src/usage.js';
 
 describe('option table', () => {
   it('lists every flag once', () => {
@@ -66,14 +66,17 @@ describe('--help', () => {
   });
 });
 
-describe('usage page', () => {
-  const html = renderUsage('8.42.0');
+describe('configuration page', () => {
+  const html = renderConfiguration('8.42.0');
 
-  it('has a section and a contents entry per heading', () => {
-    for (const id of ['configuration', 'launcher', 'control-plane', 'staging', 'troubleshooting']) {
-      expect(html).toContain(`id="${id}"`);
-      expect(html).toContain(`href="#${id}"`);
+  it('has a tab and a panel per section, keeping the old anchors', () => {
+    for (const id of ['configuration', 'launcher', 'control-plane', 'staging']) {
+      expect(html).toContain(`data-tab="${id}"`);
+      expect(html).toContain(`id="pane-${id}"`);
+      // A bare id would make the browser scroll to the panel on `#id`.
+      expect(html).not.toContain(`id="${id}"`);
     }
+    expect(html).not.toContain('data-tab="troubleshooting"');
   });
 
   it('renders the generated configuration tables', () => {
@@ -86,13 +89,10 @@ describe('usage page', () => {
     expect(html).toContain(String(DEFAULTS.port));
   });
 
-  it('names the build it describes', () => {
+  it('names the build it describes and marks itself in the nav', () => {
     expect(html).toContain('emulating Snowflake 8.42.0');
-  });
-
-  it('links to the overview and the operations reference', () => {
-    expect(html).toContain('<a href="/">&larr; Overview</a>');
-    expect(html).toContain('href="/operations"');
+    expect(html).toContain('<a href="/configuration" aria-current="page">');
+    expect(html).toContain('href="/troubleshooting"');
   });
 
   it('covers the staging caveat', () => {
@@ -100,8 +100,19 @@ describe('usage page', () => {
   });
 
   it('escapes the version', () => {
-    const hostile = renderUsage('<script>alert(1)</script>');
+    const hostile = renderConfiguration('<script>alert(1)</script>');
     expect(hostile).not.toContain('<script>alert(1)</script>');
     expect(hostile).toContain('&lt;script&gt;');
+  });
+});
+
+describe('troubleshooting page', () => {
+  const html = renderTroubleshooting('8.42.0');
+
+  it('numbers every symptom', () => {
+    const numbers = [...html.matchAll(/<td class="rn">(\d+)<\/td>/g)].map((m) => Number(m[1]));
+    expect(numbers.length).toBeGreaterThan(0);
+    expect(numbers).toEqual(numbers.map((_, i) => i + 1));
+    expect(html).toContain('<a href="/troubleshooting" aria-current="page">');
   });
 });

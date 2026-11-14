@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Srinivas Chaturvedula
 
 /**
- * The option table, shared by `snowtest --help` and the `/usage` page.
+ * The option table, shared by `snowtest --help` and the `/configuration` page.
  *
  * Flags and environment variables were declared twice before — once in the
  * help text, once in whatever documentation was current — and the two drifted.

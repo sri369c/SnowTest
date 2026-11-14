@@ -10,9 +10,6 @@ import type { StageDef } from './catalog.js';
 const DATABASE_SUFFIX = '.duckdb';
 const STAGES_FILE = 'stages.json';
 
-/** Windows can keep a handle for a moment after DuckDB releases the file, so retry deletes. */
-export const REMOVE_OPTIONS = { force: true, maxRetries: 10, retryDelay: 50 } as const;
-
 export type PersistedStage = Pick<StageDef, 'database' | 'schema' | 'name' | 'url'>;
 
 export class DataDir {
@@ -39,8 +36,8 @@ export class DataDir {
   /** Delete a detached database's file and its write-ahead log. */
   async removeDatabase(name: string): Promise<void> {
     const file = this.databaseFile(name);
-    await rm(file, REMOVE_OPTIONS);
-    await rm(`${file}.wal`, REMOVE_OPTIONS);
+    await rm(file, { force: true });
+    await rm(`${file}.wal`, { force: true });
   }
 
   async loadStages(): Promise<PersistedStage[]> {
@@ -69,6 +66,6 @@ export class DataDir {
   /** Remove every database file and the stage list. Databases must be detached first. */
   async clear(): Promise<void> {
     for (const name of await this.databases()) await this.removeDatabase(name);
-    await rm(join(this.root, STAGES_FILE), REMOVE_OPTIONS);
+    await rm(join(this.root, STAGES_FILE), { force: true });
   }
 }

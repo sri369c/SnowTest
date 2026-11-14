@@ -7,7 +7,7 @@
 # (glibc) because @duckdb/node-api ships prebuilt glibc binaries; musl/Alpine
 # would need a toolchain for no benefit here.
 
-FROM node@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS build
+FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ COPY src ./src
 RUN npm run build
 
 
-FROM node@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS runtime
+FROM node:22-bookworm-slim AS runtime
 
 ENV NODE_ENV=production \
     SNOWTEST_HOST=0.0.0.0 \
@@ -34,8 +34,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
 
-# Staged files are written to disk; the unprivileged user must own that path.
-RUN mkdir -p "$SNOWTEST_STAGE_ROOT" && chown -R node:node "$SNOWTEST_STAGE_ROOT"
+# Stage files and SNOWTEST_DATA_DIR databases are written here; the unprivileged user must own them.
+RUN mkdir -p "$SNOWTEST_STAGE_ROOT" /var/lib/snowtest/data && chown -R node:node /var/lib/snowtest
 
 USER node
 

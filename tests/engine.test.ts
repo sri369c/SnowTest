@@ -53,6 +53,12 @@ describe('engine behaviour (in memory)', () => {
     await server.close();
   });
 
+  it('redirects the old /usage page to /configuration', async () => {
+    const response = await server.app.request('/usage');
+    expect(response.status).toBe(301);
+    expect(response.headers.get('location')).toBe('/configuration');
+  });
+
   it('runs the CURRENT_* call forms dbt emits', async () => {
     const [row] = await rows(
       server,

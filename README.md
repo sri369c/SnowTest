@@ -27,10 +27,26 @@ No Node install required — run it as a container. Podman and Docker both work;
 
 ```bash
 ./setup.py up        # build, start, wait until healthy, seed example tables, print the dbt profile
-./setup.py redeploy  # after a code change: down, reset, rebuild, up (+ seed; --no-seed-examples skips)
+./setup.py redeploy  # after a code change: down, clear stages, rebuild, up (+ seed; --no-seed-examples skips)
 ./setup.py status    # container state plus /_snowtest/health
-./setup.py down      # stop and remove
+./setup.py reset     # drop all data (persisted files too) and recreate the catalog
+./setup.py down      # stop and remove (the data volume and stage directory stay)
 ```
+
+Data survives restarts: `setup.py` mounts a named volume `<name>-data` and
+sets `SNOWTEST_DATA_DIR`, so every database is a DuckDB file there. Pass
+`--no-persist` for an in-memory instance that starts clean every time.
+
+Several teams (or branches) can each run their own instance side by side:
+
+```bash
+./setup.py up --name team-a --port 3131 --network team-a-net
+```
+
+`--name` (default `snowtest`) names the container and derives its data volume
+(`team-a-data`) and stage directory (`<repo>/.snowtest/team-a/stages`). Every
+subcommand takes the same `--name`/`--port`, e.g. `./setup.py reset --name
+team-a --port 3131`. Invalid names or ports are refused.
 
 | Where the client runs | URL |
 |---|---|
@@ -41,21 +57,25 @@ Open `http://localhost:3030/` in a browser for a one-page reminder of the
 connection values, client snippets and limits.
 
 `setup.py` joins `--network` (default `snowtest-network`, created if
-missing) and sets `SNOWTEST_PORT=3030`; `compose.yaml` does the same. The bare
-image defaults to port 8080 unless `SNOWTEST_PORT` is set.
+missing) and sets `SNOWTEST_PORT=3030`; `compose.yaml` uses the same network,
+port and `snowtest-data` volume. The bare image defaults to port 8080 unless
+`SNOWTEST_PORT` is set, and to in-memory storage unless `SNOWTEST_DATA_DIR` is.
 
 By hand, if you would rather see every flag:
 
 ```bash
-podman build -t snowtest:2.0.0 .
+podman build -t snowtest:3.0.0 .
 podman network create snowtest-network   # once
 podman run -d --name snowtest --network snowtest-network \
   -p 3030:3030 -e SNOWTEST_PORT=3030 \
-  --userns=keep-id:uid=1000,gid=1000 snowtest:2.0.0
+  -v snowtest-data:/var/lib/snowtest/data -e SNOWTEST_DATA_DIR=/var/lib/snowtest/data \
+  --userns=keep-id:uid=1000,gid=1000 snowtest:3.0.0
 ```
 
 `docker build` / `docker run` are the same apart from `--userns`. Compose works
-too: `docker compose up -d` or `podman compose up -d`. To run from source
+too: `docker compose up -d` or `podman compose up -d`; its stages live in the
+`snowtest-stages` volume, which a host-side client cannot reach (see
+[Seeds and staged files](#seeds-and-staged-files)). To run from source
 instead (needs Node 20+): `npm install && npm start`.
 
 Then connect from anything that speaks Snowflake:
@@ -71,9 +91,9 @@ curl -s -X POST 'http://localhost:3030/api/v2/statements' \
 
 | Surface | Status | Used by |
 |---|---|---|
-| Driver protocol (`/session/v1/login-request`, `/queries/v1/query-request`, heartbeat, token refresh, logout, `/monitoring/queries`) | Implemented, verified against `snowflake-connector-python` 4.8 and 5.1, including gzip-encoded request bodies | Python connector, Snowpark, JDBC-style clients |
+| Driver protocol (`/session/v1/login-request`, `/queries/v1/query-request`, heartbeat, token refresh, logout, `GET /monitoring/queries/<id>`) | Implemented, including gzip-encoded request bodies; `snowflake-connector-python` 5.1 is pinned in the test suite, 3.16 and 4.8 were checked manually | Python connector, Snowpark, JDBC-style clients |
 | Key-pair (JWT) login, with optional signature verification | Implemented — see [Key-pair authentication](#key-pair-service-account-authentication) | dbt, service accounts |
-| Connector `execute_async` + `get_results_from_sfqid` | Implemented — the stored result is served through `RESULT_SCAN` | Python connector |
+| Connector `execute_async` + `get_results_from_sfqid` | **Not supported** — see Limits | — |
 | SQL REST API v2 (`/api/v2/statements`, async handles, cancel) | Implemented | HTTP integrations, curl, custom services |
 | SQL execution | DuckDB, with a Snowflake dialect layer | — |
 | `SHOW` / `DESCRIBE` / `USE` / `ALTER SESSION` | Implemented — incl. `SHOW TERSE OBJECTS/SCHEMAS/TABLES/VIEWS`, `SHOW PRIMARY/UNIQUE/IMPORTED KEYS` (always empty), `[<DB>.]information_schema.{columns,tables,views,schemata}` (incl. Snowflake-only `tables` columns read by `dbt docs generate`) | dbt, BI tools (SQLAlchemy reflection) and driver discovery |
@@ -81,15 +101,17 @@ curl -s -X POST 'http://localhost:3030/api/v2/statements' \
 | Staged files: `CREATE STAGE`, `PUT`, `GET`, `LIST`, `REMOVE`, `COPY INTO` | Implemented via local-filesystem stages | `dbt seed`, staged loads |
 | ODBC | **Not supported** | Power BI, Excel, Tableau |
 
-Each Snowflake database maps to its own DuckDB catalog, so `DB.SCHEMA.TABLE`
+Each Snowflake database maps to its own DuckDB catalog (in memory, or one file
+per database under `SNOWTEST_DATA_DIR`), so `DB.SCHEMA.TABLE`
 resolves natively and `USE DATABASE`/`USE SCHEMA` behave per session while the
 data itself is shared across connections.
 
 Once it is running, the server documents itself: `/operations` lists every
-endpoint, statement and function with its gaps, and `/usage` covers
-configuration, the launcher, staged files and troubleshooting. Both are rendered
-from the running build, so they cannot describe a different version. Where this
-file and those pages disagree, the pages are right.
+endpoint, statement and function with its gaps, `/configuration` covers flags,
+the launcher, the control plane and staged files, and `/troubleshooting` lists
+common failures. All are rendered from the running build, so they cannot
+describe a different version. Where this file and those pages disagree, the
+pages are right.
 
 ## Connecting
 
@@ -159,10 +181,9 @@ real assertion instead of a rubber stamp. `tests/dbt/verify.py` checks both.
 
 ### dbt
 
-Verified end to end against **dbt 1.12** with key-pair
-auth: `dbt debug`, `dbt run` (view, table and incremental models — including the
-second run's `merge`), `dbt test`, and re-querying the results all pass. The
-project lives in `tests/dbt/`; `npm run test:dbt` runs the whole flow.
+The bundled project in `tests/dbt/` runs over key-pair auth (`npm run
+test:dbt`); see [dbt compatibility](#dbt-compatibility) for what has been
+verified.
 
 ```yaml
 # profiles.yml — what `./setup.py up --public-key … --write-profile DIR` writes
@@ -185,14 +206,35 @@ snowtest:
       protocol: http
 ```
 
-`host`, `port`, `protocol` and `private_key_path` are ordinary dbt profile keys,
-so nothing in your project changes. Any schema works (dbt creates
+`host`, `port`, `protocol` and `private_key_path` are ordinary dbt-snowflake
+profile keys, so nothing in your project changes. Any schema works (dbt creates
 it); the bundled `tests/dbt/profiles.yml` uses `DBT_TEST` on port 18081.
 
 What dbt exercises on every run, and what snowtest answers: `SHOW TERSE
 SCHEMAS`, `SHOW TERSE OBJECTS IN SCHEMA`, `SHOW USER FUNCTIONS`, `DESCRIBE
 TABLE`, `CREATE OR REPLACE VIEW`, `CREATE OR REPLACE TRANSIENT TABLE`,
 `MERGE`, transactions, and dbt's `/* {...} */` query comments on every statement.
+
+### dbt compatibility
+
+Verified against **dbt-core 1.12.6 + dbt-snowflake 1.12.4** (password auth),
+from a clean `./setup.py reset`:
+
+| Command / feature | Result |
+|---|---|
+| `dbt debug`, `dbt seed` (twice: no duplicate rows) | pass |
+| `dbt run`: view; table with `transient`, `copy_grants`, `cluster_by`, `automatic_clustering` | pass |
+| `dbt run`: incremental `merge`, `delete+insert`, `append` (second run included) | pass |
+| `dbt run`: `contract: enforced` with `not_null` / `primary_key` constraints | pass; a NULL in a `not_null` column fails the model |
+| `dbt snapshot`: `timestamp` and `check` strategies (second run closes changed rows) | pass |
+| `dbt test` (`unique`, `not_null`), `dbt source freshness` (`loaded_at_field`) | pass |
+| `dbt docs generate`, `dbt run-operation` | pass |
+
+Not supported: dynamic tables, materialized views, Python models, `clone`
+(including `dbt clone` and zero-copy `CREATE … CLONE`), Iceberg tables,
+`GRANT`-based `grants:` configs. Source freshness needs `loaded_at_field`:
+warehouse-metadata freshness reads `last_altered`, which is always NULL here. The
+adapter's per-model status reads `00000 1` where Snowflake prints `SUCCESS 1`.
 
 ### Seeds and staged files
 
@@ -214,9 +256,13 @@ cur.execute("""
 cur.execute(f"get @SNOWTEST.PUBLIC.RAW/ file://{target_dir}/")
 ```
 
-Each stage owns a directory under `SNOWTEST_STAGE_ROOT`: `<repo>/.snowtest/stages`
-via `setup.py` (bind-mounted at the same path), `/var/lib/snowtest/stages` in the
-bare image, or a process-scoped temp directory when run from source.
+Each stage owns a directory under `SNOWTEST_STAGE_ROOT`: `<repo>/.snowtest/<name>/stages`
+via `setup.py` (bind-mounted at the same path, so a host-side client works), the
+`snowtest-stages` volume under compose (reachable only from containers that
+mount it at the same path), `/var/lib/snowtest/stages` in the bare image, or a
+process-scoped temp directory when run from source. With `SNOWTEST_DATA_DIR`
+set, stage definitions are restored at startup; the files are whatever the
+stage root still holds.
 
 ### TLS
 
@@ -231,7 +277,7 @@ insecure transport. TLS is not built in yet.
 | `GET /_snowtest/health` | Liveness probe |
 | `GET /_snowtest/state` | Current databases, schemas, warehouses, roles, sessions |
 | `POST /_snowtest/seed` | Run a SQL script (`{"sql": "..."}`) on a scratch session |
-| `POST /_snowtest/reset` | Drop all data and recreate the configured catalog |
+| `POST /_snowtest/reset` | Drop all data, persisted database files included, and recreate the configured catalog |
 
 `POST /_snowtest/reset` between tests is the closest thing to a clean
 Snowflake account:
@@ -253,13 +299,31 @@ Flags override environment variables. `setup.py` and `compose.yaml` set
 | `--database` | `SNOWTEST_DATABASE` | `SNOWTEST` |
 | `--schema` | `SNOWTEST_SCHEMA` | `PUBLIC` |
 | `--warehouse` | `SNOWTEST_WAREHOUSE` | `SNOWTEST_WH` |
-| `--data-dir` | `SNOWTEST_DATA_DIR` | unset — in memory |
+| `--data-dir` | `SNOWTEST_DATA_DIR` | unset: in memory (`/var/lib/snowtest/data` via `setup.py` / compose) |
 | `--verbose` | `SNOWTEST_VERBOSE` | off |
-| — | `SNOWTEST_ROLE` | `SYSADMIN` |
+| — | `SNOWTEST_ROLE` | `SYSADMIN` (role handed to a session that does not ask for one) |
 | — | `SNOWTEST_STAGE_ROOT` | temp dir, per process |
 
 `SNOWTEST_DATABASES`, `SNOWTEST_WAREHOUSES`, `SNOWTEST_ROLES` and
 `SNOWTEST_USERS` take comma-separated lists.
+
+Bad values stop the server at startup instead of falling back: an unknown flag,
+a flag missing its value, a port outside 1–65535 (flag or `SNOWTEST_PORT`), or a
+`SNOWTEST_VERBOSE` other than `1`/`true`/`0`/`false`.
+
+With `SNOWTEST_DATA_DIR` set, each database is `<dir>/<name>.duckdb` and stage
+definitions are kept in `<dir>/stages.json`; all of it is reattached at startup,
+`DROP DATABASE` deletes the file, `DROP DATABASE` / `DROP SCHEMA` also drop the
+stages inside, and `POST /_snowtest/reset` deletes them all. A quoted name keeps
+its case on disk (`"mydb"` is `mydb.duckdb`); file names are URL-encoded, so
+`"my db"` is `my%20db.duckdb`.
+
+`setup.py` flags shared by every subcommand: `--name` (default `snowtest`),
+`--port` (host side, default 3030), `--network` (default `snowtest-network`),
+`--persist`/`--no-persist` (default on), `--image`, `--stage-root`,
+`--public-key`, `--users`, `--env KEY=VALUE`, `--engine` (default `auto`),
+`--selinux` (default `auto`), `--userns` (default `auto`), `--timeout`
+(seconds to wait for health, default 60), `--dry-run`.
 
 `SNOWTEST_JWT_PUBLIC_KEY` takes a path to a PEM public key (or inline PEM). When
 set, key-pair logins must carry a JWT signed by the matching private key; when
@@ -271,15 +335,76 @@ DuckDB supplies real execution: joins, window functions, `QUALIFY`, CTEs,
 `MERGE`, recursive CTEs. The dialect layer translates the Snowflake constructs
 that appear in practice:
 
-`IFF`, `NVL`, `NVL2`, `ZEROIFNULL`, `NULLIFZERO`, `DIV0`, `EQUAL_NULL`,
-`DECODE`, `LISTAGG ... WITHIN GROUP`, `DATEADD`, `DATEDIFF`, `CONVERT_TIMEZONE`, `TO_VARCHAR`,
-`TO_NUMBER`, `TO_DATE`, `TO_TIMESTAMP`, `TO_BOOLEAN`, `ARRAY_CONSTRUCT`,
-`OBJECT_CONSTRUCT`, `PARSE_JSON`, `payload:path` variant access,
-`::string`/`::number`/`::variant` casts, `NUMBER`/`VARIANT`/`TIMESTAMP_NTZ`
-column types, `TRANSIENT` tables, `CLUSTER BY`, `COPY GRANTS`.
+- `IFF`, `NVL`, `NVL2`, `ZEROIFNULL`, `NULLIFZERO`, `DIV0`, `EQUAL_NULL`,
+  `DECODE` (NULL matches NULL), `DATEADD`, `DATEDIFF`, `CONVERT_TIMEZONE`,
+  `ARRAY_CONSTRUCT`, `OBJECT_CONSTRUCT`, `PARSE_JSON`, `payload:path` variant access
+  (`t.v:a.b`, `v:a[0]`, `parse_json(s):k`, quoted keys `v:"Key"` / `v:a."Q"`; a
+  key containing `"` is an error). A path cast to string (`::string`/`varchar`/
+  `text`, `[TRY_]CAST(... AS ...)`) gives a string unquoted and any other value
+  as JSON text. `v:a::string:b` is an error (write `(v:a::variant):b`), as is a
+  `:name` bind after a keyword (`LIMIT :n`); bind with `?` or `%s`.
+- `LISTAGG` / `ARRAY_AGG ... WITHIN GROUP (ORDER BY ...)`, with the order kept;
+  `ARRAY_AGG` skips NULLs and returns `[]` for no rows.
+- `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, `CURRENT_TIME`, `LOCALTIME`,
+  `CURRENT_DATE`, `SYSDATE` (UTC, NTZ), bare or with `()`; precision 0, 3 or 6–9.
+- `TO_VARCHAR`/`TO_CHAR`, `TO_DATE`, `TO_TIMESTAMP[_NTZ|_LTZ|_TZ]`, `TO_NUMBER`/
+  `TO_DECIMAL`/`TO_NUMERIC`, `TO_DOUBLE`, `TO_BOOLEAN`, `TO_BINARY`, and their
+  `TRY_` variants, which return NULL on bad input. Date/time formats are
+  translated (`YYYY`, `YY`, `MM`, `MON`, `MMMM`, `DD`, `DY`, `HH24`, `HH12`,
+  `AM`/`PM`, `MI`, `SS`, `FF3`, `FF6`, `FF9`, `FF` (= `FF9`), `TZH:TZM`,
+  `"quoted text"`); any other element (`HH`, `FF1`, ...), and any number format
+  model, is an error naming it.
+- `NUMBER`, `DECIMAL`, `NUMERIC` without a scale are `NUMBER(38,0)`, so
+  `'1.5'::number` is `2`; `VARIANT`, `OBJECT`, `ARRAY`, `STRING`, `BINARY`,
+  `FLOAT`, `TIMESTAMP_NTZ` and friends map to DuckDB types. Types are mapped only
+  where a type is named (`::`, `CAST(... AS ...)`, column definitions in
+  `CREATE TABLE` / `ALTER TABLE ... ADD | ... TYPE`), so a column called `number`
+  stays a column; quoted identifiers are never rewritten. A cast to `TIME`
+  accepts `TIMESTAMP_TZ`/`LTZ` (UTC wall clock; the engine runs in UTC whatever
+  the host zone) and refuses `24:00:00` (`TRY_CAST` gives NULL). Casts to
+  `TIME(n)` truncate to n fractional digits (0–9; 6 and up keep microseconds),
+  casts to `TIMESTAMP_NTZ`/`LTZ`/`TZ(0|3)` truncate. Columns need n of 6–9:
+  DuckDB stores TIME/TZ in microseconds and rounds `TIMESTAMP(0|3)` on write,
+  so a lower precision is an error, never silently wrong. `TIMESTAMP_NTZ(9)` is
+  nanoseconds, `(7)`/`(8)` and any other n are an error. `DESCRIBE` reports `(9)`.
+  `CREATE TABLE ... AS SELECT x::timestamp_ntz(0)` columns are full precision:
+  later fractional INSERT/MERGE values are kept, not truncated.
+  `CREATE TABLE` TIME columns
+  refuse `24:00:00` on insert, columns added by `ALTER TABLE ... ADD` fail only
+  when such a value is read. A `::time` operand is a name, literal (typed too:
+  `TIMESTAMP '...'`), call (with `OVER`/`FILTER`/`WITHIN GROUP`), parenthesised
+  expression, `CASE ... END`, variant path or earlier cast; anything else, write
+  `CAST(... AS TIME)`. Unparseable dates, times and timestamps fail with SQLSTATE
+  `22007` (code `100038`; Snowflake's own date/time codes are not reproduced).
+- String literals take Snowflake backslash escapes (`'it\'s'`, `'C:\\x'`, `\n`,
+  `\t`, `\xhh`, `\uhhhh`, octal); a NUL (`\0`) is refused.
+- `TRANSIENT` tables; `CLUSTER BY` and `COPY GRANTS` on `CREATE` are dropped;
+  `ALTER TABLE ... CLUSTER BY | DROP CLUSTERING KEY | SUSPEND/RESUME RECLUSTER`
+  are accepted no-ops.
+- `CREATE TABLE t (col type NOT NULL, ...) AS SELECT` (dbt contracts): NOT NULL
+  is enforced, primary/unique/foreign keys are dropped as Snowflake does not
+  enforce them; the query runs first, so `CREATE OR REPLACE TABLE t (...) AS
+  SELECT ... FROM t` reads the old rows.
+- `ALTER TABLE ... RENAME TO` (across schemas and databases too; across
+  databases the copy is committed and row-count verified, then the source
+  dropped) and `ALTER TABLE ... SWAP WITH` (within one database; across
+  databases it is an error).
+- `DROP DATABASE` / `DROP SCHEMA` error on a missing object unless `IF EXISTS`;
+  `DROP SCHEMA` cascades by default and `RESTRICT` refuses a non-empty schema
+  (`002003`, SQLSTATE `2BP01`).
+  Dropping the session's current database leaves it with none
+  (`CURRENT_DATABASE()` is NULL; unqualified names fail with `090105`, or
+  `090106` with a database but no current schema — `IF [NOT] EXISTS` included).
+- `USE DATABASE` / `USE SCHEMA` on a missing object fails with `002043`; it
+  never creates one.
+- `SHOW STAGES` lists the current schema by default, every schema with
+  `IN DATABASE [db]`, and everything with `IN ACCOUNT`.
+- Unquoted identifiers fold to upper case everywhere, columns and aliases
+  included: `select a` returns column `A`, `select a as "x"` returns `x`.
 
 Anything untranslatable is passed through unchanged and fails with an honest
-Snowflake-shaped error rather than silently returning wrong data.
+Snowflake-shaped error; syntax recognised but not emulated fails with
+`... is not supported on snowtest`. Neither returns silently wrong data.
 
 ## Limits
 
@@ -303,25 +428,37 @@ Being explicit, because a stub that quietly lies is worse than no stub:
   options beyond `TYPE`, `SKIP_HEADER`, `FIELD_DELIMITER`,
   `FIELD_OPTIONALLY_ENCLOSED_BY` and `NULL_IF` are ignored.
 - User stages (`@~`) and table stages (`@%table`) are not implemented.
+- A request carrying several `;`-separated statements is not split: DuckDB
+  runs them all but returns a single result, and routing follows the first
+  statement only. dbt and `execute_string` split client-side, so they are fine.
 - No ODBC.
-- `execute_async` results are kept in process memory and fetched through
-  `RESULT_SCAN` (connector 4.x) or `GET /queries/{id}/result` (connector 5.x),
-  which accept only ids this process ran: a restart forgets them. The SQL API v2
-  async path (`POST /api/v2/statements?async=true`, then
-  `GET /api/v2/statements/{handle}`) is tested too.
+- `ALTER SCHEMA ... RENAME TO` is not supported (it errors).
+- `ALTER SCHEMA ... SWAP WITH` is not supported (it errors).
+- Bracket variant paths cast to string (`col['a']::string`) are not supported (they error); write `col:a::string`.
+- DuckDB's catalog ignores case, so `"orders"` and `ORDERS` cannot coexist in
+  one schema (the second `CREATE` fails), and a query names either one.
+  Metadata (`DESCRIBE`, `SHOW`) matches the stored name exactly.
+- The `24:00:00` CHECK on `CREATE TABLE` TIME columns is lost when the table
+  is renamed across schemas or databases (it is copied), and while it is there
+  `ALTER TABLE ... ALTER COLUMN ... TYPE` on that column fails.
+- The connector's `execute_async` + `get_results_from_sfqid` result polling
+  is not implemented. Use the SQL API v2 async path
+  (`POST /api/v2/statements?async=true`, then `GET /api/v2/statements/{handle}`),
+  which is tested.
 - Result paging returns a single partition; `arrow` result format is not
   emitted (JSON only).
-- Client protocols are version-sensitive. The suite pins
-  `snowflake-connector-python` and will fail loudly if a connector release
-  changes the wire format.
+- Client protocols are version-sensitive. `tests/compat/run.sh` pins
+  `snowflake-connector-python==5.1.*`, and `tests/dbt/run.sh` installs it
+  together with `dbt-snowflake==1.12.*` in one resolve, so a client release
+  that changes the wire format fails loudly.
 
 ## Tests
 
 ```bash
 npm run typecheck     # tsc --noEmit
-npm test              # vitest: dialect translation
+npm test              # vitest: SQL translation, statements run through DuckDB, persistence, config, pages
 npm run test:py       # boots the server, runs the real Python connector suite
-npm run test:dbt      # dbt over key-pair: debug, run, run, seed, test, stages
+npm run test:dbt      # dbt-snowflake over key-pair: debug, run x2, seed x2, test, verify, stages
 ```
 
 `npm run test:py` is the important one: it starts the server, connects with the
@@ -338,26 +475,31 @@ response, which is the fastest way to debug a wire-format question.
 src/server.ts      HTTP routes: driver protocol, SQL API v2, control plane, pages
 src/meta.ts        statement router: SHOW/DESCRIBE/USE/DDL vs DuckDB
 src/engine.ts      DuckDB instance, per-session connections, catalog metadata
+src/persist.ts     SNOWTEST_DATA_DIR: database files and stage definitions
+src/stage.ts       stage directories on disk (PUT/GET/LIST/COPY INTO backing)
 src/dialect.ts     Snowflake → DuckDB SQL translation
 src/types.ts       type mapping and per-surface row encoding
 src/protocol.ts    response envelopes
+src/errors.ts      Snowflake-shaped errors (code, SQLSTATE)
 src/home.ts        the landing page served at /
 src/operations.ts  supported-operations reference at /operations, from data
-src/usage.ts       configuration and troubleshooting at /usage
+src/usage.ts       /configuration and /troubleshooting pages
 src/browse.ts      catalog browser at /browse
-src/options.ts     flags and environment, shared by --help and /usage
+src/options.ts     flags and environment, shared by --help and /configuration
 src/page.ts        shared HTML shell and stylesheet
 src/catalog.ts     databases, schemas, warehouses, roles, stages
 src/session.ts     session state and parameter registry
 src/config.ts      defaults and environment resolution
+src/version.ts     snowtest's own version, read from package.json
 src/cli.ts         command-line entry point
-setup.py           container lifecycle: build, up, down, status, logs, reset
+setup.py           container lifecycle: up, redeploy, down, status, logs, reset, build
 compose.yaml       container service definition
 Dockerfile         container image build
 data/examples.sql  sample dataset
 tests/             vitest units, then the Python connector and dbt suites
 scripts/           debugging helpers
 docs/              design notes
+.snowtest/         per-instance stage directories created by setup.py
 ```
 
 ## License

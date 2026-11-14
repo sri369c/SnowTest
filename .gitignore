@@ -34,3 +34,5 @@ tests/dbt/.user.yml
 # Created by podman machine operations under Git Bash on Windows. A file
 # named NUL cannot be checked out on Windows, so it must never be tracked.
 NUL
+
+/.github/
