@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Srinivas Chaturvedula
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   PREVIEW_LIMIT,
@@ -177,5 +177,26 @@ describe('landing page', () => {
     });
     expect(html).toContain('href="/browse/SNOWTEST/EXAMPLES"');
     expect(html).toContain('Select a schema to list its tables');
+  });
+
+  it('shows session start in server time and its length', () => {
+    vi.useFakeTimers();
+    try {
+      const createdAt = new Date(2026, 10, 12, 9, 5, 7);
+      vi.setSystemTime(createdAt.getTime() + (3600 + 2 * 60 + 5) * 1000);
+      const html = renderHome(config, 'http://localhost:3030', '8.42.0', {
+        databases: [],
+        warehouses: [],
+        roles: [],
+        stages: 0,
+        sessions: [
+          { user: 'DBT_SVC', database: 'SNOWTEST', schema: 'DBT_TEST', role: 'SYSADMIN', createdAt },
+        ],
+      });
+      expect(html).toContain('<th>Started (server time)</th><th>Length</th>');
+      expect(html).toMatch(/<td>2026-11-12 09:05:07 [^<]+<\/td><td>1h 02m 05s<\/td>/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

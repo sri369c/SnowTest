@@ -19,7 +19,7 @@ import { Hono, type Context } from 'hono';
 import { Catalog, normalizeName } from './catalog.js';
 import { loadConfig, type SnowtestConfig } from './config.js';
 import { Engine, quoteIdent, type EngineConnection } from './engine.js';
-import { SnowflakeError, authError, mapEngineError, sessionExpired } from './errors.js';
+import { SnowflakeError, authError, loginObjectNotFound, mapEngineError, sessionExpired } from './errors.js';
 import {
   PREVIEW_LIMIT,
   renderMissing,
@@ -337,6 +337,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
           database: session.database,
           schema: session.schema,
           role: session.role,
+          createdAt: session.createdAt,
         })),
       }),
     );
@@ -598,19 +599,30 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
 
     const database = normalizeName(requestedDatabase) || config.defaultDatabase;
-    // Login creates the requested (or default) database, schema and warehouse if unknown.
+    const schema = normalizeName(requestedSchema) || config.defaultSchema;
+    const warehouse = normalizeName(requestedWarehouse) || config.defaultWarehouse;
+
+    // The connector sends CLIENT_VALIDATE_DEFAULT_PARAMETERS=true for
+    // validate_default_parameters=True: unknown database/schema/warehouse fails the login.
+    // Checked after authentication so credential errors still take precedence.
+    const sessionParameters = data.SESSION_PARAMETERS as Record<string, unknown> | undefined;
+    if (sessionParameters?.CLIENT_VALIDATE_DEFAULT_PARAMETERS === true) {
+      if (!catalog.getDatabase(database)) throw loginObjectNotFound('database');
+      if (!catalog.getSchema(database, schema)) throw loginObjectNotFound('schema');
+      if (!catalog.warehouses.has(warehouse)) throw loginObjectNotFound('warehouse');
+    }
+
+    // Otherwise login creates the requested (or default) database, schema and warehouse if unknown.
     if (!catalog.getDatabase(database)) {
       catalog.createDatabase(database);
       await engine.attachDatabase(database);
       catalog.createSchema(database, 'PUBLIC');
       await engine.createSchema(database, 'PUBLIC');
     }
-    const schema = normalizeName(requestedSchema) || config.defaultSchema;
     if (!catalog.getSchema(database, schema)) {
       catalog.createSchema(database, schema);
       await engine.createSchema(database, schema);
     }
-    const warehouse = normalizeName(requestedWarehouse) || config.defaultWarehouse;
     if (!catalog.warehouses.has(warehouse)) catalog.createWarehouse(warehouse);
 
     return new Session(

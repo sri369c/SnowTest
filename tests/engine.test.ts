@@ -119,6 +119,18 @@ describe('engine behaviour (in memory)', () => {
     ).toEqual([['A'], ['Mixed']]);
   });
 
+  it('lists databases in information_schema.databases', async () => {
+    await rows(server, 'create database if not exists INFO_DB');
+    await rows(server, 'use database SNOWTEST');
+    const names = (await rows(server, 'SELECT DATABASE_NAME from information_schema.databases')).map((row) => row[0]);
+    expect(names).toEqual(expect.arrayContaining(['SNOWTEST', 'INFO_DB']));
+    const result = await sql(server, 'select * from snowtest.information_schema.databases where database_name = \'INFO_DB\'');
+    expect(result.body.resultSetMetaData?.rowType.map((column) => column.name)).toEqual([
+      'DATABASE_NAME', 'DATABASE_OWNER', 'IS_TRANSIENT', 'COMMENT', 'CREATED', 'LAST_ALTERED', 'RETENTION_TIME', 'TYPE',
+    ]);
+    expect(result.body.data?.[0]?.slice(0, 3)).toEqual(['INFO_DB', 'SYSADMIN', 'NO']);
+  });
+
   it('renames within and across schemas, and swaps', async () => {
     await rows(server, 'create schema if not exists OTHER');
     await rows(server, 'create or replace table r1 (n int not null)');
@@ -470,6 +482,51 @@ describe('quoted default database', () => {
     expect(((await login.json()) as { success: boolean }).success).toBe(true);
     expect(server.catalog.getDatabase('devDb')).toBeDefined();
     expect(server.catalog.getDatabase('DEVDB')).toBeUndefined();
+  });
+});
+
+describe('login with CLIENT_VALIDATE_DEFAULT_PARAMETERS', () => {
+  let server: SnowtestServer;
+  beforeAll(async () => {
+    server = await createServer({ dataDir: null });
+  });
+  afterAll(async () => {
+    await server.close();
+  });
+
+  async function login(fields: Record<string, unknown>): Promise<{ success: boolean; code?: string; message?: string }> {
+    const response = await server.app.request('/session/v1/login-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: { LOGIN_NAME: 'T', ...fields } }),
+    });
+    return (await response.json()) as { success: boolean; code?: string; message?: string };
+  }
+  const validate = { SESSION_PARAMETERS: { CLIENT_VALIDATE_DEFAULT_PARAMETERS: true } };
+
+  it('rejects a missing schema, database or warehouse', async () => {
+    expect(await login({ ...validate, SCHEMA_NAME: 'NO_SUCH_SCHEMA' })).toMatchObject({
+      success: false,
+      code: '390201',
+      message: 'The requested schema does not exist or not authorized.',
+    });
+    expect(server.catalog.getSchema('SNOWTEST', 'NO_SUCH_SCHEMA')).toBeUndefined();
+    expect((await login({ ...validate, DATABASE_NAME: 'NO_SUCH_DB' })).message).toBe(
+      'The requested database does not exist or not authorized.',
+    );
+    expect(server.catalog.getDatabase('NO_SUCH_DB')).toBeUndefined();
+    expect((await login({ ...validate, WAREHOUSE_NAME: 'NO_SUCH_WH' })).message).toBe(
+      'The requested warehouse does not exist or not authorized.',
+    );
+  });
+
+  it('accepts existing objects', async () => {
+    expect((await login({ ...validate, DATABASE_NAME: 'SNOWTEST', SCHEMA_NAME: 'PUBLIC' })).success).toBe(true);
+  });
+
+  it('still auto-creates without the flag', async () => {
+    expect((await login({ SCHEMA_NAME: 'AUTO_SCHEMA' })).success).toBe(true);
+    expect(server.catalog.getSchema('SNOWTEST', 'AUTO_SCHEMA')).toBeDefined();
   });
 });
 

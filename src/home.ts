@@ -33,6 +33,7 @@ export interface HomeSessionState {
   database: string | null;
   schema: string | null;
   role: string;
+  createdAt: Date;
 }
 
 export interface HomeState {
@@ -85,6 +86,32 @@ const LIVE_SCRIPT = `<script>
 })();
 </script>`;
 
+const pad = (n: number): string => String(n).padStart(2, '0');
+
+/** Server-local `YYYY-MM-DD HH:MM:SS TZ`; `server time` if no zone name. */
+export function formatServerTime(date: Date): string {
+  const zone =
+    new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+      .formatToParts(date)
+      .find((part) => part.type === 'timeZoneName')?.value || 'server time';
+  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return `${day} ${time} ${zone}`;
+}
+
+/** Compact elapsed time, e.g. `2d 3h 04m`, `1h 02m 05s`, `12m 30s`, `5s`. */
+export function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (days > 0) return `${days}d ${hours}h ${pad(minutes)}m`;
+  if (hours > 0) return `${hours}h ${pad(minutes)}m ${pad(seconds)}s`;
+  if (minutes > 0) return `${minutes}m ${pad(seconds)}s`;
+  return `${seconds}s`;
+}
+
 export function renderHome(
   config: SnowtestConfig,
   origin: string,
@@ -123,13 +150,14 @@ export function renderHome(
         ),
       )
       .join('\n') || '    <tr><td colspan="4">No databases yet.</td></tr>';
+  const now = Date.now();
   const sessionRows =
     state.sessions
       .map(
         (session) =>
-          `    <tr><td><code>${escapeHtml(session.user)}</code></td><td><code>${escapeHtml(session.database ?? 'NULL')}.${escapeHtml(session.schema ?? 'NULL')}</code></td><td>${escapeHtml(session.role)}</td></tr>`,
+          `    <tr><td><code>${escapeHtml(session.user)}</code></td><td><code>${escapeHtml(session.database ?? 'NULL')}.${escapeHtml(session.schema ?? 'NULL')}</code></td><td>${escapeHtml(session.role)}</td><td>${escapeHtml(formatServerTime(session.createdAt))}</td><td>${formatDuration(now - session.createdAt.getTime())}</td></tr>`,
       )
-      .join('\n') || '    <tr><td colspan="3">No active sessions.</td></tr>';
+      .join('\n') || '    <tr><td colspan="5">No active sessions.</td></tr>';
   const surfaceRows = LANDING_SURFACES.map(
     (surface) =>
       `  <tr><th scope="row"><a href="/operations#${escapeHtml(surface.id)}">${escapeHtml(surface.label)}</a></th><td>${escapeHtml(surface.summary)} <span class="muted">(${surface.supported} of ${surface.total} supported)</span></td></tr>`,
@@ -173,7 +201,7 @@ ${databaseRows}
 
 <h3>Active sessions</h3>
 <table>
-  <tr><th>User</th><th>Context</th><th>Role</th></tr>
+  <tr><th>User</th><th>Context</th><th>Role</th><th>Started (server time)</th><th>Length</th></tr>
 ${sessionRows}
 </table>
 </div>`;
