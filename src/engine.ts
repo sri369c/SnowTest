@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
 
 import { toSqlLiteral } from './dialect.js';
-import { mapEngineError } from './errors.js';
+import { mapEngineError, sessionExpired } from './errors.js';
 import type { DataDir } from './persist.js';
 
 export interface RawColumn {
@@ -241,19 +241,23 @@ export class Engine {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.admin.closeSync?.();
-    this.instance.closeSync?.();
-    await rm(this.noContextDir, { recursive: true, force: true });
+    this.admin.closeSync();
+    this.instance.closeSync();
+    // Best effort: a file still mapped by another handle (Windows) must not turn
+    // shutdown into a failure, and the directory is a temp dir anyway.
+    await rm(this.noContextDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
 export class EngineConnection {
   private current: string | null = null;
+  private closed = false;
 
   constructor(private readonly connection: DuckDBConnection) {}
 
   /** Snowflake `USE`. No current database or schema → the empty read-only catalog. */
   async use(database: string | null, schema: string | null): Promise<void> {
+    if (this.closed) throw sessionExpired();
     const target =
       database === null || schema === null ? qualified(NO_CONTEXT_CATALOG, 'main') : qualified(database, schema);
     if (this.current === target) return;
@@ -267,6 +271,7 @@ export class EngineConnection {
 
   /** Execute already-rewritten SQL and collect the full result. */
   async execute(sql: string): Promise<QueryResult> {
+    if (this.closed) throw sessionExpired();
     try {
       const reader = await this.connection.runAndReadAll(sql);
       const names = reader.columnNames();
@@ -296,7 +301,10 @@ export class EngineConnection {
     }
   }
 
+  /** Idempotent: sessions close their connection on logout and again on shutdown. */
   close(): void {
-    this.connection.closeSync?.();
+    if (this.closed) return;
+    this.closed = true;
+    this.connection.closeSync();
   }
 }

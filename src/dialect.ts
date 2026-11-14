@@ -475,13 +475,15 @@ const SNOWFLAKE_TABLE_COLUMNS =
 
 /** `information_schema.databases`: account-wide, values as in SHOW DATABASES, Snowflake's upper-case column names. */
 function databasesView(databases: RewriteContext['databases']): string {
-  if (!databases) throw new Error('RewriteContext.databases is required for information_schema.databases');
+  // A rewrite without a catalog wired in still answers: the account has no
+  // databases, rather than failing the statement outright.
+  const account = databases ?? [];
   const row = (name: string, comment: string, created: string) =>
     `SELECT ${name}::VARCHAR AS DATABASE_NAME, 'SYSADMIN' AS DATABASE_OWNER, 'NO' AS IS_TRANSIENT, ` +
     `${comment}::VARCHAR AS COMMENT, ${created}::TIMESTAMPTZ AS CREATED, NULL::TIMESTAMPTZ AS LAST_ALTERED, ` +
     `1 AS RETENTION_TIME, 'STANDARD' AS TYPE`;
-  if (databases.length === 0) return `${row('NULL', 'NULL', 'NULL')} WHERE FALSE`;
-  return databases
+  if (account.length === 0) return `${row('NULL', 'NULL', 'NULL')} WHERE FALSE`;
+  return account
     .map((db) => row(toSqlLiteral(db.name), toSqlLiteral(db.comment), toSqlLiteral(db.createdAt)))
     .join(' UNION ALL ');
 }

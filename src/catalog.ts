@@ -10,6 +10,8 @@
  * by a test is visible to `SHOW TABLES` immediately, with no sync step.
  */
 
+import { objectNotFound } from './errors.js';
+
 export interface SchemaDef {
   name: string;
   comment: string | null;
@@ -109,7 +111,9 @@ export class Catalog {
   createSchema(database: string, schema: string): { created: boolean; database: string; schema: string } {
     const db = this.databases.get(database);
     if (!db) {
-      throw new Error(`Database '${database}' does not exist.`);
+      // Same shape as every other missing object, so callers get a Snowflake error
+      // instead of a generic 500 from a bare `Error`.
+      throw objectNotFound('DATABASE', database);
     }
     const existed = db.schemas.has(schema);
     if (!existed) {

@@ -325,6 +325,8 @@ export class StatementRouter {
     private readonly catalog: Catalog,
     readonly stages: StageStore = new StageStore(),
     private readonly dataDir: DataDir | null = null,
+    /** Called after a database is dropped, so the server can clear every session's context. */
+    private readonly onDatabaseDropped: (database: string) => void = () => {},
   ) {}
 
   private async connectionFor(session: Session): Promise<EngineConnection> {
@@ -333,6 +335,7 @@ export class StatementRouter {
       connection = await this.engine.newConnection();
       session.connection = connection;
     }
+    session.lastUsedAt = new Date();
     await connection.use(session.database, session.schema);
     return connection;
   }
@@ -1226,11 +1229,12 @@ export class StatementRouter {
           await this.engine.dropDatabase(key);
           this.catalog.dropDatabase(key);
           await this.removeStages(key);
-          // Snowflake leaves the session with no current database.
+          // Snowflake leaves every session with no current database, not just this one.
           if (session.database === key) {
             session.database = null;
             session.schema = null;
           }
+          this.onDatabaseDropped(key);
           return statusOutcome(`${key} successfully dropped.`, STATEMENT_TYPES.drop);
         }
         case 'schema': {

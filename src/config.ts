@@ -61,8 +61,10 @@ export function parsePort(value: string, source: string): number {
 }
 
 function readBoolean(value: string | undefined, name: string): boolean {
-  if (value === undefined || value === '' || value === '0' || value === 'false') return false;
-  if (value === '1' || value === 'true') return true;
+  // Env values arrive in whatever case the shell uses; TRUE is as valid as true.
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === undefined || normalized === '' || normalized === '0' || normalized === 'false') return false;
+  if (normalized === '1' || normalized === 'true') return true;
   throw new Error(`${name} must be 1, true, 0 or false, got '${value}'.`);
 }
 
