@@ -24,11 +24,17 @@ DBT_ARGS=(--project-dir "$ROOT/tests/dbt" --profiles-dir "$ROOT/tests/dbt")
 if [ ! -x "$PY" ]; then
   python3 -m venv .venv
 fi
+# Stage transfers answer with a LOCAL_FS location: the connector copies files
+# straight into the stage directory. Connector 4.x implements that; 5.x rejects
+# the location type outright ("Unknown location type: LOCAL_FS"), so the staged
+# -file checks only mean something on 4.x. Override with SNOWTEST_DBT_CONNECTOR.
+CONNECTOR="${SNOWTEST_DBT_CONNECTOR:-4.8.*}"
+
 if ! "$PY" -c "import dbt.adapters.snowflake" >/dev/null 2>&1; then
-  echo "installing snowflake-connector-python + dbt-snowflake into .venv…"
+  echo "installing snowflake-connector-python (${CONNECTOR}) + dbt-snowflake into .venv…"
   # One resolve so both pins are honoured together.
   "$PY" -m pip install -q --disable-pip-version-check \
-    'snowflake-connector-python==5.1.*' 'dbt-snowflake==1.12.*'
+    "snowflake-connector-python==${CONNECTOR}" 'dbt-snowflake==1.12.*'
 fi
 
 if [ ! -f "$KEY" ]; then
