@@ -64,12 +64,12 @@ port and `snowtest-data` volume. The bare image defaults to port 8080 unless
 By hand, if you would rather see every flag:
 
 ```bash
-podman build -t snowtest:3.0.0 .
+podman build -t snowtest:3.0.1 .
 podman network create snowtest-network   # once
 podman run -d --name snowtest --network snowtest-network \
   -p 3030:3030 -e SNOWTEST_PORT=3030 \
   -v snowtest-data:/var/lib/snowtest/data -e SNOWTEST_DATA_DIR=/var/lib/snowtest/data \
-  --userns=keep-id:uid=1000,gid=1000 snowtest:3.0.0
+  --userns=keep-id:uid=1000,gid=1000 snowtest:3.0.1
 ```
 
 `docker build` / `docker run` are the same apart from `--userns`. Compose works

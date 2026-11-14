@@ -87,7 +87,8 @@ const STYLES = `
          margin-bottom: -1px; border: 1px solid transparent; border-radius: 6px 6px 0 0; }
   .tabs.dense .tab { padding: .35rem .55rem; }
   .tab:hover { background: #f6f8fa; }
-  .tab[aria-selected="true"] { border-color: #0969da; border-bottom: 2px solid #0969da;
+  a.tab { text-decoration: none; }
+  .tab[aria-selected="true"], .tab[aria-current] { border-color: #0969da; border-bottom: 2px solid #0969da;
                                color: #0969da; border-radius: 6px; }
   .panehead { margin: .5rem 0 .25rem; font-size: 1.05rem; display: flex; align-items: center; gap: .5rem; }
   .badge { display: inline-block; font-size: .72rem; line-height: 1.4; padding: 0 .4rem;
@@ -106,7 +107,7 @@ const STYLES = `
   @media (prefers-color-scheme: dark) {
     .tabs, .topnav { border-color: #30363d; }
     .tab:hover, .refresh:hover { background: #161b22; }
-    .tab[aria-selected="true"] { border-color: #6cb6ff; color: #6cb6ff; }
+    .tab[aria-selected="true"], .tab[aria-current] { border-color: #6cb6ff; color: #6cb6ff; }
     .badge { background: #30363d; color: #9da7b3; }
     .refresh { color: #6cb6ff; border-color: #30363d; }
   }
@@ -154,6 +155,17 @@ export interface TabOptions {
   /** Mirror the selected tab in `location.hash`; one list per page. */
   hash?: boolean;
   variant?: 'dense' | 'sub';
+}
+
+/** Tab strip of plain links, for sub-pages that sit under another page's tab. */
+export function renderTabLinks(items: ReadonlyArray<{ href: string; label: string }>, current: string): string {
+  const links = items
+    .map(
+      (item) =>
+        `<a class="tab" href="${escapeHtml(item.href)}"${item.href === current ? ' aria-current="page"' : ''}>${escapeHtml(item.label)}</a>`,
+    )
+    .join('');
+  return `<nav class="tabs" aria-label="Sections">${links}</nav>`;
 }
 
 /** Tab strip plus panels. The strip starts hidden; TAB_SCRIPT reveals it. */

@@ -1,6 +1,6 @@
 {
   "name": "snowtest",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "A Snowflake-compatible stub server for testing systems that expect a real Snowflake account.",
   "license": "MIT",
   "type": "module",
