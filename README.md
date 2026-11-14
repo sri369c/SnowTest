@@ -28,9 +28,9 @@ No Node install required — run it as a container. Podman and Docker both work;
 ```bash
 ./setup.py up        # build, start, wait until healthy, seed example tables, print the dbt profile
 ./setup.py redeploy  # after a code change: down, clear stages, rebuild, up (+ seed; --no-seed-examples skips)
-./setup.py status    # container state plus /_snowtest/health
+./setup.py status    # engine, store, machine, Desktop pipe, container state, health
 ./setup.py reset     # drop all data (persisted files too) and recreate the catalog
-./setup.py down      # stop and remove (the data volume and stage directory stay)
+./setup.py down        # stop and remove; never deletes data (volume and stages stay)
 ```
 
 Data survives restarts: `setup.py` mounts a named volume `<name>-data` and
@@ -50,26 +50,50 @@ team-a --port 3131`. Invalid names or ports are refused.
 
 | Where the client runs | URL |
 |---|---|
-| host | `http://localhost:3030` (`--port` changes the host side) |
+| host | `http://localhost:3030` (`--port` changes the host side; published on `127.0.0.1` unless `--bind` widens it) |
 | another container on `snowtest-network` | `http://snowtest:3030` |
+
+`./setup.py status` answers "is it deployed, and where?" — including which store
+it went into, because one Podman machine can hold two (rootful and rootless) and
+they have separate containers, volumes and images:
+
+```text
+engine     podman
+machine    podman-machine-srinivas: running
+store      <graphroot from podman info> (rootless)
+container  snowtest: running
+ports      3030/tcp -> 127.0.0.1:3030
+pipe       \\.\pipe\podman-machine-srinivas: ok
+health     ok  {"status": "ok", ...}
+```
+
+It also exits non-zero when the container answers but the machine's Windows pipe
+is missing: that is the state where a shell works and Podman Desktop shows an
+empty GUI. `podman machine stop && podman machine start` brings the pipe back.
 
 Open `http://localhost:3030/` in a browser for a one-page reminder of the
 connection values, client snippets and limits.
 
 `setup.py` joins `--network` (default `snowtest-network`, created if
 missing) and sets `SNOWTEST_PORT=3030`; `compose.yaml` uses the same network,
-port and `snowtest-data` volume. The bare image defaults to port 8080 unless
-`SNOWTEST_PORT` is set, and to in-memory storage unless `SNOWTEST_DATA_DIR` is.
+port and `snowtest-data` volume.
+
+A stopped machine takes the container with it. After `podman machine start`,
+`./setup.py up` starts the existing container in place (no rebuild, no recreate);
+`podman start snowtest` is the same thing without the summary.
+
+The bare image defaults to port 8080 unless `SNOWTEST_PORT` is set, and to
+in-memory storage unless `SNOWTEST_DATA_DIR` is.
 
 By hand, if you would rather see every flag:
 
 ```bash
-podman build --layers=false --format docker -t snowtest:3.1.1 .
+podman build --layers=false --format docker -t snowtest:3.2.0 .
 podman network create snowtest-network   # once
 podman run -d --name snowtest --network snowtest-network \
-  -p 3030:3030 -e SNOWTEST_PORT=3030 \
+  -p 127.0.0.1:3030:3030 -e SNOWTEST_PORT=3030 \
   -v snowtest-data:/var/lib/snowtest/data -e SNOWTEST_DATA_DIR=/var/lib/snowtest/data \
-  --userns=keep-id:uid=1000,gid=1000 snowtest:3.1.1
+  --userns=keep-id:uid=1000,gid=1000 snowtest:3.2.0
 ```
 
 `--layers=false` keeps no intermediate images behind, so the image list stays
@@ -331,7 +355,9 @@ its case on disk (`"mydb"` is `mydb.duckdb`); file names are URL-encoded, so
 `"my db"` is `my%20db.duckdb`.
 
 `setup.py` flags shared by every subcommand: `--name` (default `snowtest`),
-`--port` (host side, default 3030), `--network` (default `snowtest-network`),
+`--port` (host side, default 3030), `--bind` (host address, default `127.0.0.1`:
+the control plane is unauthenticated, so widening this is a deliberate act),
+`--network` (default `snowtest-network`),
 `--persist`/`--no-persist` (default on), `--image`, `--stage-root`,
 `--public-key`, `--users`, `--env KEY=VALUE`, `--engine` (default `auto`),
 `--selinux` (default `auto`), `--userns` (default `auto`), `--timeout`

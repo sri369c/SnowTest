@@ -48,6 +48,7 @@ const TROUBLESHOOTING: Array<[string, string]> = [
   ['`COPY INTO` loads more rows than expected', 'An earlier file is still on the stage. `REMOVE @stage` first, or use a fresh stage root.'],
   ['`execute_async` returns no rows', 'Connector async polling is not implemented. Use the SQL API with `async=true`.'],
   ['Podman: permission denied on the mount', 'Rootless mapping or a missing SELinux label. `./setup.py up` sets both.'],
+  ['Podman Desktop shows no containers', 'It can be looking at a different engine than the shell. `./setup.py status` prints the store and the Windows pipe; a healthy container with a missing pipe means the machine needs `podman machine stop && podman machine start`.'],
 ];
 
 const pane = (title: string, html: string): string => `<h2 class="panehead">${escapeHtml(title)}</h2>\n${html}`;
@@ -82,7 +83,7 @@ arguments. The same image runs under Docker.</p>
   <tbody>
       <tr><td><code>./setup.py up</code></td><td>Build if needed, start, wait until healthy, load the example tables, print a dbt profile.</td></tr>
       <tr><td><code>./setup.py redeploy</code></td><td>Down, clear staged files, rebuild, up. The data volume is kept. Use it after a code change.</td></tr>
-      <tr><td><code>./setup.py status</code></td><td>Container state and the health endpoint.</td></tr>
+      <tr><td><code>./setup.py status</code></td><td>Engine, store (rootful or rootless), machine, Desktop pipe, container state, published ports and the health endpoint. Exits non-zero when the container answers but a client on the host cannot reach it.</td></tr>
       <tr><td><code>./setup.py logs</code></td><td>Server log, for a container that will not start.</td></tr>
       <tr><td><code>./setup.py reset</code></td><td>Drop all data, persisted files included, and recreate the catalog.</td></tr>
       <tr><td><code>./setup.py down</code></td><td>Stop and remove the container; the data volume and stage directory stay.</td></tr>
@@ -90,7 +91,9 @@ arguments. The same image runs under Docker.</p>
 </table>
 <p class="muted">Worth knowing: <code>--name</code> (default <code>snowtest</code>; also names the
 <code>&lt;name&gt;-data</code> volume and the <code>.snowtest/&lt;name&gt;/stages</code> directory),
-<code>--port</code>, <code>--network</code>, <code>--no-persist</code>, <code>--public-key</code>,
+<code>--port</code>, <code>--bind</code> (default <code>127.0.0.1</code>: the control plane is
+unauthenticated, so widening it is deliberate), <code>--network</code>, <code>--no-persist</code>,
+<code>--public-key</code>,
 <code>--users</code>, <code>--env KEY=VALUE</code>, <code>--no-seed-examples</code>,
 <code>--recreate</code>, <code>--write-profile DIR</code>. Invalid names and ports are refused.
 The full list is <code>./setup.py up --help</code>.</p>`;
