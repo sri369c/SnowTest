@@ -9,7 +9,8 @@
  * belongs in a real client pointed at the same server.
  */
 
-import { escapeHtml, renderPage } from './page.js';
+import { HOME_TABS } from './home.js';
+import { escapeHtml, renderPage, renderTabLinks } from './page.js';
 import { SERVER_VERSION } from './protocol.js';
 
 /** Rows shown per preview. Small enough to stay a glance, not a table dump. */
@@ -74,11 +75,18 @@ export function formatValue(value: unknown, duckType = ''): string {
   return `${escapeHtml(text.slice(0, CELL_LIMIT))}…`;
 }
 
+const LIVE = '/#live';
+
+// Browse pages drill down from Home → Live state: show Home's tabs with Live state current.
+const homeTabs = (): string =>
+  renderTabLinks(HOME_TABS.map((tab) => ({ href: `/#${tab.id}`, label: tab.label })), LIVE);
+
 const pageHead = (database: string, schema: string, table?: string): string => {
   const databaseLink = escapeHtml(database);
   const schemaLink = table ? `<a href="${browsePath(database, schema)}">${escapeHtml(schema)}</a>` : escapeHtml(schema);
   const tail = table ? ` <span class="muted">/</span> <code>${escapeHtml(table)}</code>` : '';
-  return `<p class="crumb"><a href="/">&larr; Overview</a> <span class="muted">/</span> ${databaseLink} <span class="muted">/</span> ${schemaLink}${tail}</p>`;
+  return `${homeTabs()}
+<p class="crumb"><a href="${LIVE}">&larr; Live state</a> <span class="muted">/</span> ${databaseLink} <span class="muted">/</span> ${schemaLink}${tail}</p>`;
 };
 
 /** `/browse/<database>/<schema>`: the objects in one schema. */
@@ -110,14 +118,9 @@ export function renderSchema(
   <tbody>
 ${rows}
   </tbody>
-</table>
+</table>`;
 
-<footer>
-  Read-only previews. Run real queries against this server with any Snowflake
-  client; the reference for what it answers is at <a href="/operations">/operations</a>.
-</footer>`;
-
-  return renderPage({ title: `snowtest — ${database}.${schema}`, body, version: SERVER_VERSION });
+  return renderPage({ title: `snowtest — ${database}.${schema}`, body, version: SERVER_VERSION, nav: 'home' });
 }
 
 /** `/browse/<database>/<schema>/<table>`: columns and the first rows. */
@@ -172,19 +175,17 @@ ${bodyRows}
   </tbody>
 </table>
 </div>
+<p class="muted">${footer}</p>`;
 
-<footer>
-  ${footer}
-</footer>`;
-
-  return renderPage({ title: `snowtest — ${database}.${schema}.${table}`, body, version: SERVER_VERSION });
+  return renderPage({ title: `snowtest — ${database}.${schema}.${table}`, body, version: SERVER_VERSION, nav: 'home' });
 }
 
 /** Shown when a database, schema or object is not there (or has been dropped). */
 export function renderMissing(title: string, detail: string): string {
-  const body = `<p class="crumb"><a href="/">&larr; Overview</a></p>
+  const body = `${homeTabs()}
+<p class="crumb"><a href="${LIVE}">&larr; Live state</a></p>
 <h1>${escapeHtml(title)}</h1>
 <p class="lede">${escapeHtml(detail)}</p>
-<p><a href="/">Back to the overview</a></p>`;
-  return renderPage({ title: `snowtest — ${title}`, body, version: SERVER_VERSION });
+<p><a href="${LIVE}">Back to live state</a></p>`;
+  return renderPage({ title: `snowtest — ${title}`, body, version: SERVER_VERSION, nav: 'home' });
 }

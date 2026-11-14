@@ -43,6 +43,15 @@ export interface HomeState {
   sessions: HomeSessionState[];
 }
 
+/** Home's tabs; the catalog browser repeats them as links, with Live state current. */
+export const HOME_TABS = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'live', label: 'Live state' },
+  { id: 'connect', label: 'Connect' },
+  { id: 'speaks', label: 'What it speaks' },
+  { id: 'control', label: 'Control plane' },
+] as const;
+
 const REFRESH_ICON =
   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>';
 
@@ -244,13 +253,10 @@ ${surfaceRows}
 </p>
 
 ${renderTabs(
-  [
-    { id: 'overview', label: 'Overview', html: overview },
-    { id: 'live', label: 'Live state', html: live },
-    { id: 'connect', label: 'Connect', html: connect },
-    { id: 'speaks', label: 'What it speaks', html: speaks },
-    { id: 'control', label: 'Control plane', html: control },
-  ],
+  HOME_TABS.map((tab) => ({
+    ...tab,
+    html: { overview, live, connect, speaks, control }[tab.id],
+  })),
   { hash: true },
 )}
 ${LIVE_SCRIPT}`;

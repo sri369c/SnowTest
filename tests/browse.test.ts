@@ -91,8 +91,11 @@ describe('schema page', () => {
     expect(empty).toContain('no tables or views');
   });
 
-  it('links back to the overview', () => {
-    expect(html).toContain('<a href="/">&larr; Overview</a>');
+  it('sits under Home → Live state and links back to it', () => {
+    expect(html).toContain('<a href="/" aria-current="page">Home</a>');
+    expect(html).toContain('<a class="tab" href="/#live" aria-current="page">Live state</a>');
+    expect(html).toContain('<a href="/#live">&larr; Live state</a>');
+    expect(html).not.toContain('<footer');
   });
 });
 
@@ -159,7 +162,7 @@ describe('missing objects', () => {
   it('offers the way back', () => {
     const html = renderMissing('Schema not found', 'No schema A.B in this account.');
     expect(html).toContain('Schema not found');
-    expect(html).toContain('<a href="/">Back to the overview</a>');
+    expect(html).toContain('<a href="/#live">Back to live state</a>');
   });
 });
 

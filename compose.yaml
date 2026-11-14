@@ -6,14 +6,14 @@
 services:
   snowtest:
     build: .
-    image: snowtest:3.0.0
+    image: snowtest:3.0.1
     ports:
       - "3030:3030"
     environment:
       SNOWTEST_PORT: "3030"
       # Remove to keep everything in memory (a restart is then a clean slate).
       SNOWTEST_DATA_DIR: /var/lib/snowtest/data
-      # Set to verify key-pair logins; see the README or the running server's /usage page.
+      # Set to verify key-pair logins; see the README or the running server's /configuration page.
       # SNOWTEST_JWT_PUBLIC_KEY: /keys/rsa_key.pub
     volumes:
       - snowtest-stages:/var/lib/snowtest/stages
