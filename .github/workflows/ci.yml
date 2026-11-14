@@ -98,12 +98,18 @@ jobs:
       - name: Check the engine
         run: |
           set -eu
-          ${{ matrix.engine }} --version
-          driver=$(${{ matrix.engine }} info --format '{{.Store.GraphDriverName}}')
-          echo "storage driver: $driver"
+          # The two engines do not share this field: podman keeps the storage
+          # driver under .Store, and docker's info has no .Store at all (it
+          # reports .Driver). Asking either one for the other's field exits 1.
           if [ "${{ matrix.engine }}" = "podman" ]; then
+            podman --version
+            driver=$(podman info --format '{{.Store.GraphDriverName}}')
+            echo "storage driver: $driver"
             # Fail here, with the driver printed, if the vfs config did not apply.
             test "$driver" = "vfs"
+          else
+            docker --version
+            echo "storage driver: $(docker info --format '{{.Driver}}')"
           fi
       - name: Build
         run: |
