@@ -69,3 +69,91 @@ jobs:
       - name: Ensure python3-venv and openssl are available
         run: python3 -c "import venv, ensurepip" || (sudo apt-get update && sudo apt-get install -y python3-venv openssl)
       - run: npm run test:dbt
+
+  image:
+    # Nothing else exercises the Dockerfile or the build flags, and a dropped
+    # HEALTHCHECK or a leftover <none> image is invisible to the suites above.
+    name: image ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      IMAGE: snowtest:ci
+      CONTAINER: ci-snowtest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install podman
+        if: matrix.engine == 'podman'
+        run: |
+          sudo apt-get update
+          # uidmap provides newuidmap/newgidmap, which rootless podman needs.
+          sudo apt-get install -y podman uidmap
+          mkdir -p ~/.config/containers
+          # VFS needs neither overlayfs support nor fuse, so it works on any
+          # runner filesystem; the user config overrides /usr/share/containers.
+          printf '[storage]\ndriver = "vfs"\n' > ~/.config/containers/storage.conf
+      - name: Check the engine
+        run: |
+          set -eu
+          # The two engines do not share this field: podman keeps the storage
+          # driver under .Store, and docker's info has no .Store at all (it
+          # reports .Driver). Asking either one for the other's field exits 1.
+          if [ "${{ matrix.engine }}" = "podman" ]; then
+            podman --version
+            driver=$(podman info --format '{{.Store.GraphDriverName}}')
+            echo "storage driver: $driver"
+            # Fail here, with the driver printed, if the vfs config did not apply.
+            test "$driver" = "vfs"
+          else
+            docker --version
+            echo "storage driver: $(docker info --format '{{.Driver}}')"
+          fi
+      - name: Build
+        run: |
+          if [ "${{ matrix.engine }}" = "podman" ]; then
+            podman build --layers=false --format docker -t snowtest:ci .
+          else
+            docker build -t snowtest:ci .
+          fi
+      - name: Image list stays clean
+        run: |
+          test "$(${{ matrix.engine }} image ls --filter dangling=true -q | wc -l)" -eq 0
+      - name: Serves /_snowtest/health and reports healthy
+        run: |
+          set -eu
+          engine=${{ matrix.engine }}
+          cleanup() {
+            code=$?
+            if [ "$code" -ne 0 ]; then $engine logs "$CONTAINER" || true; fi
+            $engine rm -f "$CONTAINER" || true
+            exit "$code"
+          }
+          trap cleanup EXIT
+          $engine run -d --name "$CONTAINER" -p 127.0.0.1:3030:3030 \
+            -e SNOWTEST_PORT=3030 "$IMAGE"
+
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3030/_snowtest/health; then break; fi
+            sleep 1
+          done
+          if ! curl -sf http://127.0.0.1:3030/_snowtest/health; then
+            echo "::error::the container never answered /_snowtest/health"
+            exit 1
+          fi
+
+          # The HEALTHCHECK must be recorded *and* working. Docker keeps it in
+          # .Config.Healthcheck, podman at the top level, and the template below
+          # errors outright when the image carries none -- so this single
+          # behavioural assertion covers both engines without pinning a layout.
+          for _ in $(seq 1 40); do
+            status=$($engine inspect "$CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)
+            echo "health: $status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::the container never became healthy: no working HEALTHCHECK in the image"
+          $engine image inspect "$IMAGE" | head -40
+          exit 1

@@ -11,5 +11,10 @@ docs
 scripts
 data
 *.log
+# Stage files live here; they can be large and must never enter the build context.
+.snowtest
+.env
+.pytest_cache
+.coverage
 __pycache__
 .DS_Store

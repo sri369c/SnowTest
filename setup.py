@@ -53,7 +53,19 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_NAME = "snowtest"
 CONTAINER_PORT = 3030
 DEFAULT_PORT = 3030
-DEFAULT_IMAGE = "snowtest:3.1.1"
+
+
+def _package_version() -> str:
+    """The image tag follows package.json, so a release bump has one place to change."""
+    try:
+        return str(json.loads((PROJECT_ROOT / "package.json").read_text(encoding="utf-8"))["version"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"setup.py: could not read the version from package.json: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+DEFAULT_VERSION = _package_version()
+DEFAULT_IMAGE = f"snowtest:{DEFAULT_VERSION}"
 DEFAULT_NETWORK = "snowtest-network"
 DATA_MOUNT = "/var/lib/snowtest/data"
 ACCOUNT = "SNOWTEST"
@@ -74,6 +86,7 @@ examples:
   ./setup.py up --name team-a --port 3131 --network team-a-net   # a second, isolated instance
   ./setup.py up --no-persist         # in-memory: a restart is a clean slate
   ./setup.py up --dry-run            # print the podman commands, run nothing
+  ./setup.py status                  # engine, store, machine, Desktop pipe, container state, health
   ./setup.py logs -f
   ./setup.py reset                   # clean slate between test runs
   ./setup.py redeploy                # pick up code changes: down, clear stages, build, up (keeps data volume)
@@ -285,14 +298,119 @@ def container_state(engine: str, args: argparse.Namespace) -> str | None:
     return proc.stdout.strip() or None
 
 
+def engine_store(engine: str, args: argparse.Namespace) -> str:
+    """Which store the engine is using, and whether it is the rootless one.
+
+    Two stores live in one podman machine, so "where did this deploy go?" is a
+    real question; `status` answers it instead of leaving the user to guess.
+    These fields are engine-specific: `.Store.GraphRoot` and
+    `.Host.Security.Rootless` do not exist in docker's info, whose single store
+    is `.DockerRootDir`.
+    """
+    template = (
+        "{{.Store.GraphRoot}} ({{if .Host.Security.Rootless}}rootless{{else}}rootful{{end}})"
+        if engine == "podman"
+        else "{{.DockerRootDir}}"
+    )
+    value = run(
+        [engine, "info", "--format", template],
+        capture=True, echo=False, check=False, dry=args.dry_run,
+    )
+    return value.strip() or "unknown"
+
+
+def machine_info(engine: str, args: argparse.Namespace) -> tuple[str, str] | None:
+    """Name and state of the podman machine behind this engine, if any."""
+    if engine != "podman":
+        return None
+    listing = run(
+        [engine, "machine", "list", "--format", "{{.Name}}\t{{.Running}}"],
+        capture=True, echo=False, check=False, dry=args.dry_run,
+    )
+    for line in listing.splitlines():
+        name, _, running = line.partition("\t")
+        name = name.strip().rstrip("*")
+        if name:
+            return name, ("running" if running.strip().lower() == "true" else "stopped")
+    return None
+
+
+def windows_pipe_state(machine: str) -> str | None:
+    """Whether the named pipe a GUI client connects to exists.
+
+    Returns None when there is nothing to check (other platforms), so callers can
+    tell "no pipe here" apart from "pipe broken".
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        exists = bool(ctypes.windll.kernel32.WaitNamedPipeW(f"\\\\.\\pipe\\{machine}", 0))
+    except (OSError, AttributeError):
+        return "unknown"
+    return "ok" if exists else "missing (Podman Desktop cannot connect)"
+
+
+def inspect_value(engine: str, target: str, template: str,
+                  args: argparse.Namespace) -> str | None:
+    """One `inspect --format` field of a container or image, if it exists."""
+    value = run(
+        [engine, "inspect", "--format", template, target],
+        capture=True, echo=False, check=False, dry=args.dry_run,
+    )
+    return value.strip() or None
+
+
+def warn_if_image_moved(engine: str, args: argparse.Namespace) -> None:
+    """Point out a running container that is on an older image than the tag.
+
+    Rebuilding the tag does not touch a running container, so without this the
+    tests quietly run yesterday's build.
+    """
+    if args.dry_run:
+        return
+    current = inspect_value(engine, args.name, "{{.Image}}", args)
+    wanted = inspect_value(engine, args.image, "{{.Id}}", args)
+    if not current or not wanted:
+        return
+    # Both are content IDs (`sha256:` plus the digest), so the first 19 characters
+    # already identify the image without caring which form the engine printed.
+    if current[:19] != wanted[:19]:
+        note(f"  note: {args.name} is running an older image than {args.image}")
+        note("        run ./setup.py redeploy to move it onto the current build")
+
+
 def build_image(engine: str, image: str, args: argparse.Namespace,
                 *, no_cache: bool = False) -> None:
     note(f"building {image} with {engine}")
-    cmd = [engine, "build", "-t", image]
+    # Podman-only image hygiene: `--layers=false` keeps no intermediate (untagged)
+    # images behind, so the image list stays free of `<none>` entries; the cost is
+    # that every build reruns `npm ci` instead of reusing a cache. `--format docker`
+    # is what records the Dockerfile's HEALTHCHECK, which podman's OCI default drops
+    # silently. Docker's builder has neither flag, and records the health check anyway.
+    cmd = [engine, "build"]
+    if engine == "podman":
+        cmd += ["--layers=false", "--format", "docker"]
+    cmd += ["-t", image]
     if no_cache:
         cmd.append("--no-cache")
     cmd.append(str(PROJECT_ROOT))
-    run(cmd, dry=args.dry_run)
+    try:
+        run(cmd, dry=args.dry_run)
+    finally:
+        # Belt and braces: a build that fails midway can still leave an untagged
+        # layer behind, and dangling images are never wanted here.
+        note("pruning dangling images")
+        run([engine, "image", "prune", "-f"], dry=args.dry_run, check=False)
+    # The prune above is the fix; this is the check that it kept working. A build
+    # that leaves <none> entries is a failure here, not a cosmetic surprise.
+    dangling = run(
+        [engine, "image", "ls", "--filter", "dangling=true", "-q"],
+        capture=True, echo=False, check=False, dry=args.dry_run,
+    )
+    if dangling.strip():
+        die("the build left dangling images behind: " + ", ".join(dangling.split()[:5]))
 
 
 def remove_container(engine: str, args: argparse.Namespace) -> bool:
@@ -323,7 +441,7 @@ def create_container(engine: str, args: argparse.Namespace, stage: Path) -> None
         "--name", args.name,
         "--network", args.network,
         "--restart", "unless-stopped",
-        "-p", f"{args.port}:{CONTAINER_PORT}",
+        "-p", f"{args.bind}:{args.port}:{CONTAINER_PORT}",
         "-e", f"SNOWTEST_PORT={CONTAINER_PORT}",
         "-e", f"SNOWTEST_STAGE_ROOT={container_path(stage)}",
         *bind(stage, container_path(stage), args),
@@ -445,6 +563,7 @@ def print_summary(args: argparse.Namespace, stage: Path, health: dict) -> None:
     note(f"snowtest is up.  (health: {health.get('status', '?')})")
     note("")
     note(f"  endpoint   {base_url(args)}  (http://{args.name}:{CONTAINER_PORT} on {args.network})")
+    note(f"  published  {args.bind}:{args.port} -> {CONTAINER_PORT}")
     note(f"  account    {ACCOUNT}   database {DATABASE}   warehouse {WAREHOUSE}")
     note(f"  stages     {stage}  (bind-mounted at {container_path(stage)} inside)")
     if args.persist:
@@ -476,23 +595,30 @@ def cmd_up(args: argparse.Namespace) -> int:
     if args.rebuild or not image_present(engine, args.image, args.dry_run):
         build_image(engine, args.image, args)
 
-    state = container_state(engine, args)
-    if state == "running" and not args.recreate:
-        note(f"container {args.name} is already running; probing it (use --recreate to restart)")
+    def finish() -> int:
+        warn_if_image_moved(engine, args)
         health = wait_for_health(args)
         seed_examples(args)
         print_summary(args, stage, health)
         maybe_write_profile(args)
         return 0
+
+    state = container_state(engine, args)
+    if state == "running" and not args.recreate:
+        note(f"container {args.name} is already running; probing it (use --recreate to restart)")
+        return finish()
+    if state is not None and not args.recreate:
+        # A machine restart leaves the container stopped, not gone. Starting it in
+        # place keeps its identity and takes a second; `redeploy` is still the way
+        # to pick up changed flags or a new image.
+        note(f"starting existing container {args.name} (state: {state}); use --recreate to replace it")
+        run([engine, "start", args.name], dry=args.dry_run)
+        return finish()
     if state is not None:
         remove_container(engine, args)
 
     create_container(engine, args, stage)
-    health = wait_for_health(args)
-    seed_examples(args)
-    print_summary(args, stage, health)
-    maybe_write_profile(args)
-    return 0
+    return finish()
 
 
 def cmd_redeploy(args: argparse.Namespace) -> int:
@@ -525,6 +651,9 @@ def cmd_redeploy(args: argparse.Namespace) -> int:
 
 
 def cmd_down(args: argparse.Namespace) -> int:
+    # Deliberate: `down` never deletes the data volume or the stage directory.
+    # Losing a test database by accident costs far more than a manual
+    # `<engine> volume rm <name>-data`, so there is no purge flag to add here.
     engine = resolve_engine(args.engine, args.dry_run)
     if not remove_container(engine, args):
         note(f"no container named {args.name}")
@@ -535,20 +664,32 @@ def cmd_down(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    """Everything needed to answer "is it deployed, and where?" in one screen."""
     candidates = ["podman", "docker"] if args.engine == "auto" else [args.engine]
     engine = next((name for name in candidates if shutil.which(name)), None)
+    machine: tuple[str, str] | None = None
+    pipe = None
 
     if engine:
         state = container_state(engine, args)
         note(f"engine     {engine}")
+        machine = machine_info(engine, args)
+        if machine:
+            note(f"machine    {machine[0]}: {machine[1]}")
+        note(f"store      {engine_store(engine, args)}")
         note(f"container  {args.name}: {state or 'not created'}")
         if state:
-            ports = subprocess.run(
+            ports = run(
                 [engine, "port", args.name],
-                text=True, capture_output=True,
-            ).stdout.strip()
+                capture=True, echo=False, check=False, dry=args.dry_run,
+            ).strip()
             if ports:
                 note(f"ports      {ports}")
+            warn_if_image_moved(engine, args)
+        if engine == "podman" and machine:
+            pipe = windows_pipe_state(machine[0])
+            if pipe is not None:
+                note(f"pipe       \\\\.\\pipe\\{machine[0]}: {pipe}")
     else:
         note("engine     none installed (probing HTTP anyway)")
 
@@ -556,6 +697,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         health = http_json(base_url(args) + "/_snowtest/health", timeout=3.0)
         note(f"health     ok  {json.dumps(health)}")
         note(f"endpoint   {base_url(args)}")
+        if pipe is not None and pipe != "ok":
+            # A healthy container that no local client can reach is a failure, not
+            # a detail: that is exactly how an empty Podman Desktop looks.
+            note("problem    the container answers, but the machine's Windows pipe is missing,")
+            note("           so GUI clients cannot see it. Restart the machine:")
+            note("             podman machine stop && podman machine start")
+            return 1
         return 0
     except (urllib.error.URLError, OSError) as exc:
         note(f"health     unreachable ({exc})")
@@ -605,6 +753,9 @@ def add_common(parser: argparse.ArgumentParser) -> None:
                              f"directory .snowtest/<name>/stages (default: {DEFAULT_NAME})")
     parser.add_argument("--port", type=port_number, default=DEFAULT_PORT,
                         help=f"host port to publish (default: {DEFAULT_PORT})")
+    parser.add_argument("--bind", default="127.0.0.1", metavar="ADDRESS",
+                        help="host address to publish on (default: 127.0.0.1; "
+                             "the control plane is unauthenticated, so 0.0.0.0 exposes it)")
     parser.add_argument("--network", type=engine_name, default=DEFAULT_NETWORK,
                         help=f"container network to join (default: {DEFAULT_NETWORK})")
     parser.add_argument("--persist", action=argparse.BooleanOptionalAction, default=True,

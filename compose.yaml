@@ -6,9 +6,12 @@
 services:
   snowtest:
     build: .
-    image: snowtest:3.1.1
+    # setup.py tags from package.json; this fallback is the one place that cannot
+    # read it, so bump it here alongside a release (or export SNOWTEST_VERSION).
+    image: snowtest:${SNOWTEST_VERSION:-3.2.0}
     ports:
-      - "3030:3030"
+      # Loopback only: the /_snowtest/* control plane is unauthenticated.
+      - "127.0.0.1:3030:3030"
     environment:
       SNOWTEST_PORT: "3030"
       # Remove to keep everything in memory (a restart is then a clean slate).
