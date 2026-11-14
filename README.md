@@ -64,13 +64,17 @@ port and `snowtest-data` volume. The bare image defaults to port 8080 unless
 By hand, if you would rather see every flag:
 
 ```bash
-podman build --format docker -t snowtest:3.1.1 .
+podman build --layers=false --format docker -t snowtest:3.1.1 .
 podman network create snowtest-network   # once
 podman run -d --name snowtest --network snowtest-network \
   -p 3030:3030 -e SNOWTEST_PORT=3030 \
   -v snowtest-data:/var/lib/snowtest/data -e SNOWTEST_DATA_DIR=/var/lib/snowtest/data \
   --userns=keep-id:uid=1000,gid=1000 snowtest:3.1.1
 ```
+
+`--layers=false` keeps no intermediate images behind, so the image list stays
+clean; the trade-off is that each build reruns `npm ci` instead of reusing a
+cache. `--format docker` is what records the Dockerfile's health check.
 
 Under Git Bash, prefix these with `MSYS_NO_PATHCONV=1`: MSYS otherwise rewrites
 `/var/lib/snowtest/data` into a Windows path and startup fails with
