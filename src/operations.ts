@@ -349,7 +349,7 @@ export const GROUPS: OperationGroup[] = [
         note: '`DESCRIBE` resolves a table or view, and fails with object-not-found otherwise.',
       },
       {
-        syntax: 'information_schema.columns | tables | views | schemata',
+        syntax: 'information_schema.columns | tables | views | schemata | databases',
         behaviour: 'Rewritten to carry the Snowflake-only columns, such as `bytes` and `last_altered`.',
         status: 'supported',
       },

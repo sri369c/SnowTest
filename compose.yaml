@@ -6,7 +6,7 @@
 services:
   snowtest:
     build: .
-    image: snowtest:3.0.1
+    image: snowtest:3.1.0
     ports:
       - "3030:3030"
     environment:

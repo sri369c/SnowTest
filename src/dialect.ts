@@ -15,7 +15,7 @@
  * faithfully (an unknown format element, say) raises `unsupported()`.
  */
 
-import { normalizeName } from './catalog.js';
+import { normalizeName, type DatabaseDef } from './catalog.js';
 import { compilationError, noCurrentContext, unsupported } from './errors.js';
 
 export interface RewriteContext {
@@ -27,6 +27,8 @@ export interface RewriteContext {
   warehouse: string;
   account?: string;
   version?: string;
+  /** Account databases, for `information_schema.databases`. */
+  databases?: ReadonlyArray<Pick<DatabaseDef, 'name' | 'comment' | 'createdAt'>>;
   /** Translate `col:field` variant paths into `json_extract`. */
   variantPaths?: boolean;
 }
@@ -471,26 +473,41 @@ const SNOWFLAKE_TABLE_COLUMNS =
   `NULL::BIGINT AS row_count, NULL::BIGINT AS bytes, NULL::TIMESTAMPTZ AS created, ` +
   `NULL::TIMESTAMPTZ AS last_altered, 'NO' AS is_transient, 'NO' AS is_dynamic, 'NO' AS is_iceberg`;
 
+/** `information_schema.databases`: account-wide, values as in SHOW DATABASES, Snowflake's upper-case column names. */
+function databasesView(databases: RewriteContext['databases']): string {
+  if (!databases) throw new Error('RewriteContext.databases is required for information_schema.databases');
+  const row = (name: string, comment: string, created: string) =>
+    `SELECT ${name}::VARCHAR AS DATABASE_NAME, 'SYSADMIN' AS DATABASE_OWNER, 'NO' AS IS_TRANSIENT, ` +
+    `${comment}::VARCHAR AS COMMENT, ${created}::TIMESTAMPTZ AS CREATED, NULL::TIMESTAMPTZ AS LAST_ALTERED, ` +
+    `1 AS RETENTION_TIME, 'STANDARD' AS TYPE`;
+  if (databases.length === 0) return `${row('NULL', 'NULL', 'NULL')} WHERE FALSE`;
+  return databases
+    .map((db) => row(toSqlLiteral(db.name), toSqlLiteral(db.comment), toSqlLiteral(db.createdAt)))
+    .join(' UNION ALL ');
+}
+
 /**
  * `[DB.]information_schema.<view>` → DuckDB's global information_schema filtered
  * to DB (the session database when unqualified, as in Snowflake): DuckDB only
- * exposes information_schema in its system catalog.
+ * exposes information_schema in its system catalog. `databases` is built from the catalog.
  * Generated text is masked so later rewrite rules leave it alone.
  */
 function databaseInformationSchema(
   sql: string,
-  currentDatabase: string | null,
+  ctx: RewriteContext,
   literal: (value: string) => string,
 ): string {
   return sql.replace(
-    /(?<![\w$".])(?:("[^"]+"|[A-Za-z_][\w$]*)\s*\.\s*)?(?:information_schema|"INFORMATION_SCHEMA")\s*\.\s*(columns|tables|views|schemata)\b/gi,
+    /(?<![\w$".])(?:("[^"]+"|[A-Za-z_][\w$]*)\s*\.\s*)?(?:information_schema|"INFORMATION_SCHEMA")\s*\.\s*(columns|tables|views|schemata|databases)\b/gi,
     (_match, database: string | undefined, view: string) => {
       const name = view.toLowerCase();
-      const target = database ? normalizeName(database) : currentDatabase;
+      const target = database ? normalizeName(database) : ctx.database;
       if (target === null) throw noCurrentContext('database', 'SELECT');
       const catalog = toSqlLiteral(target);
       const body =
-        name === 'schemata'
+        name === 'databases'
+          ? databasesView(ctx.databases)
+          : name === 'schemata'
           ? `SELECT * FROM information_schema.schemata WHERE catalog_name = ${catalog}`
           : name === 'columns'
             ? `SELECT * REPLACE (${SNOWFLAKE_DATA_TYPE} AS data_type), column_comment AS comment, ` +
@@ -984,7 +1001,7 @@ export function rewrite(
   const literal = (value: string) => pushOpaque(parts, value);
 
   // Reads quoted names itself, so it runs before they are masked.
-  text = databaseInformationSchema(text, ctx.database, literal);
+  text = databaseInformationSchema(text, ctx, literal);
   text = maskIdentifiers(text, parts);
 
   if (bindings.length > 0) {

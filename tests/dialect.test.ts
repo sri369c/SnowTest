@@ -276,6 +276,19 @@ describe('information_schema', () => {
       expect(out).toContain(` AS ${column}`);
     }
   });
+
+  it('lists account databases from the catalog, qualified or not', () => {
+    const databases = [{ name: 'DB_A', comment: null, createdAt: new Date('2026-01-02T03:04:05Z') }];
+    for (const sql of [
+      'SELECT DATABASE_NAME from information_schema.databases',
+      'SELECT database_name FROM "DB_A".INFORMATION_SCHEMA.DATABASES',
+    ]) {
+      const out = rewrite(sql, { ...ctx, databases });
+      expect(out).toContain("'DB_A'::VARCHAR AS DATABASE_NAME");
+      expect(out).toContain("'2026-01-02 03:04:05.000'::TIMESTAMPTZ AS CREATED");
+    }
+    expect(rewrite('SELECT * FROM information_schema.databases', { ...ctx, databases: [] })).toContain('WHERE FALSE');
+  });
 });
 
 describe('variant access', () => {

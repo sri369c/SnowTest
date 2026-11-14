@@ -1699,6 +1699,7 @@ export class StatementRouter {
         role: session.role,
         user: session.user,
         warehouse: session.warehouse,
+        databases: [...this.catalog.databases.values()],
       },
       options.bindings ?? [],
     );

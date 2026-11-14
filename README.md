@@ -64,12 +64,12 @@ port and `snowtest-data` volume. The bare image defaults to port 8080 unless
 By hand, if you would rather see every flag:
 
 ```bash
-podman build -t snowtest:3.0.1 .
+podman build -t snowtest:3.1.0 .
 podman network create snowtest-network   # once
 podman run -d --name snowtest --network snowtest-network \
   -p 3030:3030 -e SNOWTEST_PORT=3030 \
   -v snowtest-data:/var/lib/snowtest/data -e SNOWTEST_DATA_DIR=/var/lib/snowtest/data \
-  --userns=keep-id:uid=1000,gid=1000 snowtest:3.0.1
+  --userns=keep-id:uid=1000,gid=1000 snowtest:3.1.0
 ```
 
 `docker build` / `docker run` are the same apart from `--userns`. Compose works
@@ -96,7 +96,7 @@ curl -s -X POST 'http://localhost:3030/api/v2/statements' \
 | Connector `execute_async` + `get_results_from_sfqid` | **Not supported** — see Limits | — |
 | SQL REST API v2 (`/api/v2/statements`, async handles, cancel) | Implemented | HTTP integrations, curl, custom services |
 | SQL execution | DuckDB, with a Snowflake dialect layer | — |
-| `SHOW` / `DESCRIBE` / `USE` / `ALTER SESSION` | Implemented — incl. `SHOW TERSE OBJECTS/SCHEMAS/TABLES/VIEWS`, `SHOW PRIMARY/UNIQUE/IMPORTED KEYS` (always empty), `[<DB>.]information_schema.{columns,tables,views,schemata}` (incl. Snowflake-only `tables` columns read by `dbt docs generate`) | dbt, BI tools (SQLAlchemy reflection) and driver discovery |
+| `SHOW` / `DESCRIBE` / `USE` / `ALTER SESSION` | Implemented — incl. `SHOW TERSE OBJECTS/SCHEMAS/TABLES/VIEWS`, `SHOW PRIMARY/UNIQUE/IMPORTED KEYS` (always empty), `[<DB>.]information_schema.{columns,tables,views,schemata,databases}` (incl. Snowflake-only `tables` columns read by `dbt docs generate`) | dbt, BI tools (SQLAlchemy reflection) and driver discovery |
 | Account DDL (databases, schemas, warehouses, roles, stages) | Implemented | — |
 | Staged files: `CREATE STAGE`, `PUT`, `GET`, `LIST`, `REMOVE`, `COPY INTO` | Implemented via local-filesystem stages | `dbt seed`, staged loads |
 | ODBC | **Not supported** | Power BI, Excel, Tableau |

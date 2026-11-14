@@ -77,6 +77,17 @@ export function authError(message = 'Incorrect username or password was specifie
   return new SnowflakeError('390100', message, '28000', 'auth');
 }
 
+/**
+ * `390201` — login asked for a database/schema/warehouse that does not exist
+ * (connector `validate_default_parameters=True`). Code and message as reported by
+ * Snowflake, e.g. https://github.com/snowflakedb/gosnowflake/issues/640 and
+ * https://github.com/snowflakedb/terraform-provider-snowflake/issues/1099. The
+ * server-side sqlState is unverified: 08004 is what gosnowflake reports (.NET says 08006).
+ */
+export function loginObjectNotFound(kind: 'database' | 'schema' | 'warehouse'): SnowflakeError {
+  return new SnowflakeError('390201', `The requested ${kind} does not exist or not authorized.`, '08004', 'auth');
+}
+
 export function protocolError(message: string): SnowflakeError {
   return new SnowflakeError('000000', message, '08000', 'protocol');
 }
