@@ -72,33 +72,48 @@ export SNOWTEST_BAD_KEY="$BAD_KEY"
 
 rm -rf "$ROOT/tests/dbt/target" "$ROOT/tests/dbt/logs"
 
-echo "building…"
-npm run build >/dev/null
+healthy() { curl -sf "http://127.0.0.1:${PORT}/_snowtest/health" >/dev/null 2>&1; }
 
-echo "starting snowtest on ${PORT} with key-pair verification (log: ${LOG})"
-node dist/cli.js --port "$PORT" --verbose >"$LOG" 2>&1 &
-SERVER_PID=$!
+SERVER_PID=""
 cleanup() {
-  if kill -0 "$SERVER_PID" 2>/dev/null; then
+  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 80); do
-  curl -sf "http://127.0.0.1:${PORT}/_snowtest/health" >/dev/null 2>&1 && break
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo "server exited during startup:" >&2
+# A server already answering on this port is used as it stands, so a suite can be
+# pointed at a running instance and leave its data and timings behind. Only a
+# missing server is started, and only a started one is stopped on exit.
+if healthy; then
+  echo "reusing the snowtest already answering on port ${PORT}"
+  echo "note: this suite logs in with the key pair in tests/dbt/keys and then checks that"
+  echo "      an unregistered key is refused, so that instance must have been started with"
+  echo "      the matching public key (SNOWTEST_JWT_PUBLIC_KEY). Started without one, it"
+  echo "      accepts every key and that negative check fails."
+else
+  echo "building…"
+  npm run build >/dev/null
+
+  echo "starting snowtest on ${PORT} with key-pair verification (log: ${LOG})"
+  node dist/cli.js --port "$PORT" --verbose >"$LOG" 2>&1 &
+  SERVER_PID=$!
+
+  for _ in $(seq 1 80); do
+    healthy && break
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "server exited during startup:" >&2
+      cat "$LOG" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if ! healthy; then
+    echo "server never became ready:" >&2
     cat "$LOG" >&2
     exit 1
   fi
-  sleep 0.25
-done
-if ! curl -sf "http://127.0.0.1:${PORT}/_snowtest/health" >/dev/null 2>&1; then
-  echo "server never became ready:" >&2
-  cat "$LOG" >&2
-  exit 1
 fi
 
 FAILED=0
@@ -112,8 +127,10 @@ step() {
   fi
   FAILED=$((FAILED + 1))
   echo ">>> ${name} FAILED"
-  echo "--- server log (last 25 lines) ---"
-  tail -25 "$LOG" || true
+  if [ -n "${SERVER_PID}" ]; then
+    echo "--- server log (last 25 lines) ---"
+    tail -25 "$LOG" || true
+  fi
   return 0
 }
 

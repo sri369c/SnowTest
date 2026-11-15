@@ -160,7 +160,9 @@ describe('landing page', () => {
 
   it('keeps live state refreshable in place', () => {
     expect(html).toContain('id="live-body"');
-    expect(html).toContain('id="live-refresh"');
+    // One script binds every button by attribute, so the markup carries the contract.
+    expect(html).toContain('data-refresh="live-body"');
+    expect(html).toContain("document.querySelectorAll('[data-refresh]')");
     expect(html).not.toContain('Reload to refresh');
   });
 });

@@ -19,39 +19,47 @@ if [ ! -x .venv/bin/python ]; then
   ./.venv/bin/pip install -q --disable-pip-version-check 'snowflake-connector-python==5.1.*'
 fi
 
-echo "building…"
-npm run build >/dev/null
+healthy() { curl -sf "http://127.0.0.1:${PORT}/_snowtest/health" >/dev/null 2>&1; }
 
-# Run the built binary directly: `npx tsx` spawns a child, so killing the
-# wrapper leaves an orphaned server holding the port and serving stale code.
-echo "starting snowtest on port ${PORT} (log: ${LOG})"
-node dist/cli.js --port "${PORT}" --verbose >"${LOG}" 2>&1 &
-SERVER_PID=$!
-
+SERVER_PID=""
 cleanup() {
-  if kill -0 "${SERVER_PID}" 2>/dev/null; then
+  if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
     kill "${SERVER_PID}" 2>/dev/null || true
     wait "${SERVER_PID}" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 80); do
-  if curl -sf "http://127.0.0.1:${PORT}/_snowtest/health" >/dev/null 2>&1; then
-    break
-  fi
-  if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-    echo "server exited during startup:" >&2
+# A server already answering on this port (a container left running, say) is used
+# as it stands: its data and its timings table are the reason to point a suite at
+# it, and stopping it here would throw that away. Only a missing server is started.
+if healthy; then
+  echo "reusing the snowtest already answering on port ${PORT}"
+else
+  echo "building…"
+  npm run build >/dev/null
+
+  # Run the built binary directly: `npx tsx` spawns a child, so killing the
+  # wrapper leaves an orphaned server holding the port and serving stale code.
+  echo "starting snowtest on port ${PORT} (log: ${LOG})"
+  node dist/cli.js --port "${PORT}" --verbose >"${LOG}" 2>&1 &
+  SERVER_PID=$!
+
+  for _ in $(seq 1 80); do
+    healthy && break
+    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+      echo "server exited during startup:" >&2
+      cat "${LOG}" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+
+  if ! healthy; then
+    echo "server never became ready:" >&2
     cat "${LOG}" >&2
     exit 1
   fi
-  sleep 0.25
-done
-
-if ! curl -sf "http://127.0.0.1:${PORT}/_snowtest/health" >/dev/null 2>&1; then
-  echo "server never became ready:" >&2
-  cat "${LOG}" >&2
-  exit 1
 fi
 
 set +e
@@ -59,7 +67,7 @@ set +e
 STATUS=$?
 set -e
 
-if [ "${STATUS}" -ne 0 ]; then
+if [ "${STATUS}" -ne 0 ] && [ -n "${SERVER_PID}" ]; then
   echo ""
   echo "=== server log (last 60 lines) ==="
   tail -60 "${LOG}"

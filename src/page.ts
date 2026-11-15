@@ -100,8 +100,6 @@ const STYLES = `
   .refresh { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .85rem;
              cursor: pointer; color: #0969da; background: none; border: 1px solid #d0d7de;
              border-radius: 6px; padding: .2rem .6rem; }
-  .rowbar { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
-  .rowbar h3 { margin: 0; }
   .refresh.danger { color: #b42318; }
   .refresh.danger:hover { border-color: #b42318; background: #fff5f5; }
   .refresh:disabled { cursor: not-allowed; opacity: .5; }

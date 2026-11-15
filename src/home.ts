@@ -73,44 +73,39 @@ export const HOME_TABS = [
 const REFRESH_ICON =
   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>';
 
-/**
- * A Refresh button beside a live stamp: re-fetches `/` and swaps exactly one
- * region, so each tab updates on its own without a full page reload. A failure
- * is shown, never left looking current.
- */
-function refreshScript(buttonId: string, stampId: string, bodyId: string): string {
-  return `<script>
+// One script for every refresh button on the page: `data-refresh` names the region
+// to swap, and the stamp beside the button shows when it last ran. A failure is
+// shown, never left looking current.
+const REFRESH_SCRIPT = `<script>
 (() => {
-  const button = document.getElementById('${buttonId}');
-  const at = document.getElementById('${stampId}');
-  const stamp = () => { at.textContent = 'updated ' + new Date().toLocaleTimeString(); };
-  stamp();
-  button.addEventListener('click', async () => {
-    button.classList.add('busy');
-    button.classList.remove('err');
-    button.disabled = true;
-    try {
-      const response = await fetch('/', { cache: 'no-store' });
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-      const fresh = doc.getElementById('${bodyId}');
-      if (!fresh) throw new Error('${bodyId} missing from response');
-      document.getElementById('${bodyId}').replaceWith(fresh);
-      stamp();
-    } catch (error) {
-      button.classList.add('err');
-      at.textContent = 'refresh failed: ' + error.message;
-    } finally {
-      button.classList.remove('busy');
-      button.disabled = false;
-    }
-  });
+  for (const button of document.querySelectorAll('[data-refresh]')) {
+    const body = button.dataset.refresh;
+    const at = button.parentElement.querySelector('[data-stamp]');
+    const stamp = () => { at.textContent = 'updated ' + new Date().toLocaleTimeString(); };
+    stamp();
+    button.addEventListener('click', async () => {
+      button.classList.add('busy');
+      button.classList.remove('err');
+      button.disabled = true;
+      try {
+        const response = await fetch('/', { cache: 'no-store' });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+        const fresh = doc.getElementById(body);
+        if (!fresh) throw new Error(body + ' missing from response');
+        document.getElementById(body).replaceWith(fresh);
+        stamp();
+      } catch (error) {
+        button.classList.add('err');
+        at.textContent = 'refresh failed: ' + error.message;
+      } finally {
+        button.classList.remove('busy');
+        button.disabled = false;
+      }
+    });
+  }
 })();
 </script>`;
-}
-
-const LIVE_SCRIPT = refreshScript('live-refresh', 'live-at', 'live-body');
-const TIMINGS_SCRIPT = refreshScript('timings-refresh', 'timings-at', 'timings-body');
 
 // The Clear Data tab is static, so its listeners can hold their elements.
 const CLEAR_SCRIPT = `<script>
@@ -121,11 +116,10 @@ const CLEAR_SCRIPT = `<script>
   const word = document.getElementById('clear-word');
   const go = document.getElementById('clear-go');
   const error = document.getElementById('clear-error');
-  const fail = (what) => (problem) => {
+  const fail = (what, problem) => {
     error.hidden = false;
     error.textContent = what + ' failed: ' + problem.message;
   };
-  const close = (dialog) => dialog.close();
 
   document.getElementById('clear-timings-open').addEventListener('click', () => {
     error.hidden = true;
@@ -139,7 +133,7 @@ const CLEAR_SCRIPT = `<script>
     word.focus();
   });
   for (const button of document.querySelectorAll('.modal [data-close]')) {
-    button.addEventListener('click', () => close(button.closest('dialog')));
+    button.addEventListener('click', () => button.closest('dialog').close());
   }
   // A confirmation is for the click that caused it, not for every refresh after.
   // The flag lives in the URL so it survives the redirect, and is dropped as soon
@@ -164,7 +158,7 @@ const CLEAR_SCRIPT = `<script>
     } catch (problem) {
       event.target.disabled = false;
       timingsDialog.close();
-      fail('Clear')(problem);
+      fail('Clear', problem);
     }
   });
   word.addEventListener('input', () => {
@@ -179,7 +173,7 @@ const CLEAR_SCRIPT = `<script>
     } catch (problem) {
       go.disabled = false;
       allDialog.close();
-      fail('Reset')(problem);
+      fail('Reset', problem);
     }
   });
 })();
@@ -212,7 +206,7 @@ export function formatDuration(ms: number): string {
 }
 
 /** A single statement is usually under a second, so this counts in milliseconds. */
-export function formatElapsed(ms: number): string {
+function formatElapsed(ms: number): string {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
   return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)}s`;
 }
@@ -304,7 +298,7 @@ export function renderHome(
 </ul>`;
 
   // `live-body` is swapped in place by the refresh button; keep the id on the server-rendered copy.
-  const live = `<div class="livebar"><span class="muted" id="live-at" aria-live="polite"></span><button type="button" class="refresh" id="live-refresh" title="Refresh live state">${REFRESH_ICON}Refresh</button></div>
+  const live = `<div class="livebar"><span class="muted" data-stamp aria-live="polite"></span><button type="button" class="refresh" data-refresh="live-body" title="Refresh live state">${REFRESH_ICON}Refresh</button></div>
 <div id="live-body">
 <p class="muted">
   ${state.databases.length} database(s) &middot; ${objectCount} table/view(s) &middot;
@@ -444,13 +438,21 @@ ${surfaceRows}
   </form>
 </dialog>`;
 
+  // The count is the whole table; the list underneath is only its latest page, so
+  // say both numbers whenever they differ.
+  const timingsCount =
+    state.queries.length < state.queryCount
+      ? `${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, the latest ${state.queries.length} below.`
+      : `${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, all of them below.`;
+
   // `timings-body` is swapped in place by this tab's own refresh button.
-  const timings = `<div class="livebar"><span class="muted" id="timings-at" aria-live="polite"></span><button type="button" class="refresh" id="timings-refresh" title="Refresh the query timings">${REFRESH_ICON}Refresh</button></div>
+  const timings = `<div class="livebar"><span class="muted" data-stamp aria-live="polite"></span><button type="button" class="refresh" data-refresh="timings-body" title="Refresh the query timings">${REFRESH_ICON}Refresh</button></div>
 <div id="timings-body">
 <p class="muted">
-  Every statement the server runs, newest first, the way Snowflake keeps it in
-  <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>. That table is a real one —
-  query it from a client for anything older than this preview.
+  ${timingsCount}
+  Every statement the server runs is timed into that table, newest first, the way
+  Snowflake keeps it. It is a real table — query it from a client for anything
+  older than this preview.
 </p>
 <table>
   <tr><th>Started (server time)</th><th>User</th><th>Statement</th><th>Took</th><th>Rows</th><th>Status</th></tr>
@@ -489,8 +491,7 @@ ${renderTabs(
   })),
   { hash: true },
 )}
-${LIVE_SCRIPT}
-${TIMINGS_SCRIPT}
+${REFRESH_SCRIPT}
 ${CLEAR_SCRIPT}`;
 
   return renderPage({ title: 'snowtest — Snowflake-compatible stub server', body, version, nav: 'home' });

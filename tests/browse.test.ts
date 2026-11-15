@@ -10,7 +10,7 @@ import {
   renderSchema,
 } from '../src/browse.js';
 import type { SnowtestConfig } from '../src/config.js';
-import { renderHome } from '../src/home.js';
+import { HOME_TABS, renderHome } from '../src/home.js';
 
 const config: SnowtestConfig = {
   port: 3030,
@@ -203,5 +203,43 @@ describe('landing page', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('keeps Query timings a tab of its own, right before Clear Data', () => {
+    // The strip is generated from HOME_TABS, so a reshuffle there is exactly what
+    // would move or lose this pane without anything else noticing.
+    const labels = HOME_TABS.map((tab) => tab.label);
+    expect(labels).toContain('Query timings');
+    expect(labels.indexOf('Query timings')).toBe(labels.indexOf('Clear Data') - 1);
+
+    const html = renderHome(config, 'http://localhost:3030', '8.42.0', {
+      databases: [],
+      warehouses: ['SNOWTEST_WH'],
+      roles: ['SYSADMIN'],
+      stages: 0,
+      queries: [
+        {
+          queryText: 'SELECT 1 AS ONE',
+          startedAt: new Date(2026, 10, 12, 9, 5, 7),
+          elapsedMs: 4,
+          rowsProduced: 1,
+          status: 'SUCCESS',
+          user: 'SNOWTEST_USER',
+        },
+      ],
+      queryCount: 1,
+      sessions: [],
+    });
+
+    // Hyphens are excluded on purpose: the Connect tab's own sub-tabs share this
+    // markup, and they are not part of the strip being checked.
+    const ids = [...html.matchAll(/data-tab="([a-z]+)"/g)].map((match) => match[1]);
+    expect(ids).toContain('timings');
+    expect(ids.indexOf('timings')).toBe(ids.indexOf('clear') - 1);
+
+    const pane = html.slice(html.indexOf('id="pane-timings"'), html.indexOf('id="pane-clear"'));
+    expect(pane).toContain('SELECT 1 AS ONE');
+    expect(pane).toContain('4ms');
+    expect(pane).toContain('SNOWTEST_USER');
   });
 });
