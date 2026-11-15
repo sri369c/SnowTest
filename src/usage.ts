@@ -47,6 +47,9 @@ const TROUBLESHOOTING: Array<[string, string]> = [
   ['Data is gone after a restart', 'The server ran in memory. Set `SNOWTEST_DATA_DIR`; `./setup.py up` does unless `--no-persist`.'],
   ['`COPY INTO` loads more rows than expected', 'An earlier file is still on the stage. `REMOVE @stage` first, or use a fresh stage root.'],
   ['`execute_async` returns no rows', 'Connector async polling is not implemented. Use the SQL API with `async=true`.'],
+  ['A time-dependent test flakes', 'Set `SNOWTEST_CLOCK` to a frozen instant or an offset: `current_timestamp`, `current_date`, `current_time`, `sysdate` and `getdate` all follow it.'],
+  ['`SNOWTEST_CLOCK` (or another setting) has no effect in the container', 'A shell export does not reach the container. `setup.py` forwards only what it is given: pass `--env SNOWTEST_CLOCK=…` (with `--recreate` for an existing container). Compose forwards `SNOWTEST_CLOCK` itself when it is exported.'],
+  ['A script only ran its first statement', 'Fixed in 3.3.0: every `;`-separated statement is routed now. Set `MULTI_STATEMENT_COUNT` when a client needs the count checked.'],
   ['Podman: permission denied on the mount', 'Rootless mapping or a missing SELinux label. `./setup.py up` sets both.'],
   ['Podman Desktop shows no containers', 'It can be looking at a different engine than the shell. `./setup.py status` prints the store and the Windows pipe; a healthy container with a missing pipe means the machine needs `podman machine stop && podman machine start`.'],
 ];

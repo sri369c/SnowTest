@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { DEFAULTS, loadConfig, parsePort } from '../src/config.js';
+import { DEFAULTS, loadConfig, parseClock, parsePort } from '../src/config.js';
 import { PACKAGE_VERSION, readPackageVersion } from '../src/version.js';
 
 const saved = { ...process.env };
@@ -16,11 +16,28 @@ afterEach(() => {
 });
 
 describe('configuration validation', () => {
-  it('accepts a port between 1 and 65535 only', () => {
+  it('accepts a port between 1 and 65535, and 0 for a free one', () => {
     expect(parsePort('3131', '--port')).toBe(3131);
-    for (const bad of ['0', '65536', '30a0', '-1', '', '3.5']) {
+    expect(parsePort('0', '--port')).toBe(0);
+    for (const bad of ['65536', '30a0', '-1', '', '3.5']) {
       expect(() => parsePort(bad, '--port'), bad).toThrow(/between 1 and 65535/);
     }
+  });
+
+  it('reads SNOWTEST_CLOCK as an instant or an offset, and refuses anything else', () => {
+    expect(parseClock(undefined)).toBeNull();
+    expect(parseClock('  ')).toBeNull();
+
+    const fixed = parseClock('2026-01-31T09:00:00Z');
+    expect(fixed?.kind).toBe('fixed');
+    expect(fixed?.kind === 'fixed' ? fixed.at.toISOString() : null).toBe('2026-01-31T09:00:00.000Z');
+
+    const ahead = parseClock('+30m');
+    expect(ahead).toEqual({ kind: 'offset', ms: 30 * 60_000 });
+    const behind = parseClock('-2h');
+    expect(behind).toEqual({ kind: 'offset', ms: -2 * 3_600_000 });
+
+    expect(() => parseClock('tomorrow')).toThrow(/SNOWTEST_CLOCK/);
   });
 
   it('rejects an invalid SNOWTEST_PORT instead of falling back', () => {

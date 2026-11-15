@@ -27,6 +27,7 @@ const config: SnowtestConfig = {
   roles: ['SYSADMIN'],
   verbose: false,
   dataDir: null,
+  clock: null,
 };
 
 describe('cell formatting', () => {

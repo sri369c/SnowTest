@@ -8,8 +8,8 @@ this way, and where the sharp edges are**. For commands, see the README and the
 running server's `/configuration` page.
 
 - **Status:** working; `snowflake-connector-python` 5.1 is pinned in the test
-  suite, 3.16 and 4.8 were checked manually; `dbt-core` 1.12 / `dbt-snowflake`
-  1.12 over key-pair and password auth.
+  suite, 3.16 and 4.8 were checked manually; `dbt-snowflake` 1.12 over key-pair
+  auth.
 - **Not** a Snowflake replacement: no warehouses, no privileges, no cloud
   storage, no multi-node behaviour.
 
@@ -198,7 +198,7 @@ flowchart TD
   VERB -->|"ALTER TABLE cluster / rename / swap"| ALT["no-op, or move tables<br/>one transaction per database"]
   VERB -->|CREATE / DROP / ALTER / COMMENT| DDL["catalog + DuckDB"]
   VERB -->|INSERT OVERWRITE| OW["DELETE then INSERT"]
-  VERB -->|BEGIN / COMMIT / ROLLBACK| TX["accepted as no-ops"]
+  VERB -->|BEGIN / COMMIT / ROLLBACK| TX["transaction on the session's connection"]
   VERB -->|anything else| RW["dialect rewrite"]
   RW --> DB[("DuckDB")]
 ```
@@ -282,6 +282,9 @@ Statements the router handles before translation (`src/meta.ts`):
 | Statement | Handling |
 |---|---|
 | `CREATE TABLE t (col type [NOT NULL] …) AS SELECT` | split by `splitColumnListCtas`: query into a temp table first (a self-reference reads the old rows), typed `CREATE` (PK/UNIQUE/FK dropped), then `INSERT` from the temp table, in one transaction |
+| `BEGIN` / `COMMIT` / `ROLLBACK` | a real DuckDB transaction on the session's connection. A failed statement aborts it, and DuckDB has no `SAVEPOINT`, so the router's own internal transactions join an open client transaction instead of nesting |
+| `CREATE TABLE … CLONE …` | copy the source's column definitions and rows; `AT`/`BEFORE` and `CREATE DATABASE | SCHEMA … CLONE` are refused |
+| `a; b; c` | `splitStatements` runs each in turn; the driver protocol answers with the last outcome, the SQL API with one per statement |
 | `ALTER TABLE t CLUSTER BY …` / `DROP CLUSTERING KEY` / `SUSPEND`/`RESUME RECLUSTER` | existence check, then a no-op |
 | `ALTER TABLE t RENAME TO [db.][schema.]u` | DuckDB rename within a schema; across schemas, copy columns (type, NOT NULL) and rows, then drop, in one transaction; across databases (one written database per DuckDB transaction) commit a row-count-verified copy, then drop the source, removing the copy if that fails |
 | `ALTER TABLE t SWAP WITH u` | three moves through a parked name, in one transaction; across databases refused (`not supported on snowtest`) |
@@ -384,11 +387,15 @@ Consequences, stated plainly:
 
 ## 10. dbt compatibility
 
-Supported and verified (dbt-core 1.12.6, dbt-snowflake 1.12.4): `dbt debug`,
-`dbt seed`, `dbt run` (view; table with `transient`, `copy_grants`,
-`cluster_by`, `automatic_clustering`; incremental `merge`, `delete+insert`,
-`append`; `contract: enforced`), `dbt snapshot` (`timestamp` and `check`),
-`dbt test`, `dbt source freshness`, `dbt docs generate`, `dbt run-operation`.
+Verified by `npm run test:dbt`, on the pair pinned in `tests/dbt/run.sh`
+(dbt-core 1.12.7, dbt-snowflake 1.12.5): `dbt debug`, `dbt run` (view, table,
+incremental), `dbt seed` twice, `dbt test`, and the stage cycle.
+
+Checked by hand on an earlier pin (dbt-core 1.12.6, dbt-snowflake 1.12.4), and
+not part of the suite: `transient`, `copy_grants`, `cluster_by`,
+`automatic_clustering`, incremental `delete+insert` and `append`, `contract:
+enforced`, `dbt snapshot` (`timestamp` and `check`), `dbt source freshness`,
+`dbt docs generate`, `dbt run-operation`.
 Not supported: dynamic tables, materialized views, Python models, clone,
 Iceberg, `grants:`.
 
@@ -398,7 +405,7 @@ about it:
 | dbt does this | snowtest's answer |
 |---|---|
 | `SHOW TERSE SCHEMAS IN DATABASE` before anything else | synthesised from the catalog |
-| `SHOW TERSE OBJECTS IN SCHEMA` for its relation cache | six required columns, including `is_dynamic` / `is_iceberg` |
+| `SHOW OBJECTS IN SCHEMA … LIMIT n` for its relation cache | six required columns, including `is_dynamic` / `is_iceberg` |
 | `SHOW USER FUNCTIONS IN SCHEMA` | empty set with `catalog_name` |
 | `DESCRIBE TABLE …` | from `duckdb_columns()`, Snowflake type names |
 | `CREATE OR REPLACE VIEW` on an existing view | replaced in place; the failure seen here was dbt's case-sensitive cache lookup, fixed by folding identifiers |

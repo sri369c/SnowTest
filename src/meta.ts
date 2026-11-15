@@ -161,6 +161,95 @@ function stripComments(sql: string): string {
   return out;
 }
 
+/**
+ * Split a request into its `;`-separated statements, ignoring separators inside
+ * string literals, quoted identifiers, comments and `$$…$$` bodies.
+ *
+ * Snowflake runs each statement in turn: the driver protocol answers with the
+ * last result, the SQL API with one per statement. Before this the whole request
+ * went to DuckDB as one string, so routing followed the first statement and the
+ * result was whichever one DuckDB chose to return.
+ */
+export function splitStatements(sql: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let i = 0;
+  let quote: string | null = null;
+  let dollar: string | null = null;
+
+  while (i < sql.length) {
+    const ch = sql[i];
+
+    if (dollar) {
+      if (sql.startsWith(dollar, i)) {
+        current += dollar;
+        i += dollar.length;
+        dollar = null;
+        continue;
+      }
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (quote) {
+      current += ch;
+      // Snowflake string literals take backslash escapes (`'it\'s'`).
+      if (quote === "'" && ch === '\\' && i + 1 < sql.length) {
+        current += sql[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '$') {
+      const tag = /^\$[A-Za-z_]*\$/.exec(sql.slice(i));
+      if (tag) {
+        dollar = tag[0];
+        current += dollar;
+        i += dollar.length;
+        continue;
+      }
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      const end = sql.indexOf('*/', i + 2);
+      const stop = end === -1 ? sql.length : end + 2;
+      current += sql.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') {
+      const end = sql.indexOf('\n', i);
+      const stop = end === -1 ? sql.length : end;
+      current += sql.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (ch === ';') {
+      parts.push(current);
+      current = '';
+      i += 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+
+  parts.push(current);
+  return parts.map((part) => part.trim()).filter((part) => part.length > 0);
+}
+
+/** `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] t CLONE src`, with any trailing AT/BEFORE. */
+const CLONE_TABLE =
+  /^create\s+(or\s+replace\s+)?(?:transient\s+)?table\s+(if\s+not\s+exists\s+)?([\w$".]+)\s+clone\s+([\w$".]+)([\s\S]*)$/i;
+
 function splitName(reference: string): string[] {
   const parts: string[] = [];
   let current = '';
@@ -348,14 +437,15 @@ export class StatementRouter {
 
     const verb = /^([a-z]+)/i.exec(statement)?.[1]?.toUpperCase() ?? '';
 
-    // DuckDB autocommits every statement, so Snowflake's explicit transaction
-    // control (which clients issue around loads) has nothing to do here.
-    if (verb === 'COMMIT' || verb === 'ROLLBACK' || verb === 'BEGIN' || verb === 'START') {
-      return statusOutcome(
-        'Statement executed successfully.',
-        verb === 'COMMIT' ? STATEMENT_TYPES.commit : STATEMENT_TYPES.rollback,
-      );
+    // Explicit transactions are real. The session's own connection carries them,
+    // so a failed statement aborts the transaction and ROLLBACK discards what the
+    // client wrote. They used to be accepted and ignored, which meant a test that
+    // asserted "the failed load left nothing behind" passed with the rows there.
+    if (verb === 'BEGIN' || (verb === 'START' && /^start\s+transaction\b/i.test(statement))) {
+      return this.handleBegin(session);
     }
+    if (verb === 'COMMIT') return this.handleCommit(session);
+    if (verb === 'ROLLBACK') return this.handleRollback(session);
 
     // dbt seeds the first batch of rows with `INSERT OVERWRITE INTO ...`, which
     // clears the table and inserts in one DML statement. DuckDB has no such
@@ -378,6 +468,17 @@ export class StatementRouter {
     if (verb === 'CREATE') {
       const ctas = splitColumnListCtas(statement);
       if (ctas) return this.handleColumnListCtas(ctas, session, options);
+      const clone = CLONE_TABLE.exec(statement);
+      if (clone) {
+        return this.handleCloneTable(
+          clone[1] !== undefined,
+          clone[2] !== undefined,
+          clone[3],
+          clone[4],
+          clone[5] ?? '',
+          session,
+        );
+      }
     }
     if (verb === 'ALTER' && /^alter\s+table\b/i.test(statement)) {
       const handled = await this.handleAlterTable(statement, session);
@@ -389,6 +490,31 @@ export class StatementRouter {
     }
 
     return this.runOnEngine(statement, session, options);
+  }
+
+  /**
+   * Run a request that may hold several `;`-separated statements.
+   *
+   * Routing happens per statement, so a `USE`, a `BEGIN` or a `CREATE` in the
+   * middle of a script now takes effect instead of being decided by the first
+   * statement alone.
+   */
+  async executeMany(sql: string, session: Session, options: ExecuteOptions = {}): Promise<Outcome[]> {
+    const statements = splitStatements(sql);
+    if (statements.length <= 1) return [await this.execute(sql, session, options)];
+
+    // MULTI_STATEMENT_COUNT is enforced only when the client set it: the default
+    // of 1 would otherwise reject every script.
+    const declared = session.multiStatementCount();
+    if (declared !== null && declared !== 0 && declared !== statements.length) {
+      throw compilationError(
+        `The request contains ${statements.length} statements but MULTI_STATEMENT_COUNT is ${declared}.`,
+      );
+    }
+
+    const outcomes: Outcome[] = [];
+    for (const statement of statements) outcomes.push(await this.execute(statement, session, options));
+    return outcomes;
   }
 
   private async handleInsertOverwrite(
@@ -417,16 +543,99 @@ export class StatementRouter {
     await this.dataDir?.saveStages(this.catalog.stages.values());
   }
 
-  /** Run `work` in one DuckDB transaction on the session's connection. */
+  /**
+   * Run `work` in one DuckDB transaction on the session's connection.
+   *
+   * Inside a client's own transaction the work joins it and must not commit
+   * behind the client's back: DuckDB has no SAVEPOINT, so there is nothing to
+   * nest with. A failure there aborts the client's transaction, as Snowflake does.
+   */
   private async inTransaction<T>(connection: EngineConnection, work: () => Promise<T>): Promise<T> {
-    await connection.execute('BEGIN TRANSACTION');
+    if (connection.inTransaction) return work();
+    await connection.beginTransaction();
     try {
       const result = await work();
-      await connection.execute('COMMIT');
+      await connection.commitTransaction();
       return result;
     } catch (error) {
-      return failAfter(error, () => connection.execute('ROLLBACK'));
+      return failAfter(error, () => connection.rollbackTransaction());
     }
+  }
+
+  private async handleBegin(session: Session): Promise<Outcome> {
+    const connection = await this.connectionFor(session);
+    await connection.beginTransaction();
+    return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.rollback);
+  }
+
+  private async handleCommit(session: Session): Promise<Outcome> {
+    const connection = await this.connectionFor(session);
+    await connection.commitTransaction();
+    return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.commit);
+  }
+
+  private async handleRollback(session: Session): Promise<Outcome> {
+    const connection = await this.connectionFor(session);
+    await connection.rollbackTransaction();
+    return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.rollback);
+  }
+
+  /**
+   * Existence checks read the session's own connection while it holds a
+   * transaction: the admin connection only ever sees committed state, so a table
+   * created inside a transaction would otherwise look like it does not exist.
+   */
+  private async objectKindFor(
+    session: Session,
+    database: string,
+    schema: string,
+    name: string,
+  ): Promise<'TABLE' | 'VIEW' | null> {
+    const connection = session.connection as EngineConnection | null;
+    if (connection?.inTransaction) return connection.objectKind(database, schema, name);
+    return this.engine.objectKind(database, schema, name);
+  }
+
+  /**
+   * `CREATE TABLE … CLONE`: a full copy of the source, not Snowflake's zero-copy
+   * clone. DuckDB has nothing cheaper, and the documentation says copy rather
+   * than implying the two tables share storage.
+   */
+  private async handleCloneTable(
+    orReplace: boolean,
+    ifNotExists: boolean,
+    targetRef: string,
+    sourceRef: string,
+    rest: string,
+    session: Session,
+  ): Promise<Outcome> {
+    if (/\b(?:at|before)\b/i.test(rest)) {
+      throw unsupported('CREATE TABLE … CLONE with AT or BEFORE (time travel)');
+    }
+    const target = resolveTable(session, targetRef);
+    const source = resolveTable(session, sourceRef);
+    if (!this.catalog.getSchema(target.database, target.schema)) {
+      throw objectNotFound('SCHEMA', `${target.database}.${target.schema}`);
+    }
+    if ((await this.objectKindFor(session, source.database, source.schema, source.name)) !== 'TABLE') {
+      throw objectNotFound('TABLE', displayName(source));
+    }
+    const connection = await this.connectionFor(session);
+    if (await this.objectKindFor(session, target.database, target.schema, target.name)) {
+      if (ifNotExists) {
+        return statusOutcome(`${target.name} already exists, statement succeeded.`, STATEMENT_TYPES.create);
+      }
+      if (!orReplace) throw compilationError(`Object '${displayName(target)}' already exists.`);
+      await connection.execute(`DROP TABLE ${qualifiedTable(target)}`);
+    }
+    const definition = await this.columnDefinitions(connection, source);
+    await this.inTransaction(connection, async () => {
+      await connection.execute(`CREATE TABLE ${qualifiedTable(target)} (${definition})`);
+      await connection.execute(
+        `INSERT INTO ${qualifiedTable(target)} SELECT * FROM ${qualifiedTable(source)}`,
+      );
+    });
+    return statusOutcome(`Table ${target.name} successfully created.`, STATEMENT_TYPES.create);
   }
 
   /** Typed create, then insert by position, atomically: a NOT NULL violation keeps any replaced table. */
@@ -436,7 +645,10 @@ export class StatementRouter {
     options: ExecuteOptions,
   ): Promise<Outcome> {
     const target = resolveTable(session, ctas.table);
-    if (ctas.ifNotExists && (await this.engine.objectKind(target.database, target.schema, target.name))) {
+    if (
+      ctas.ifNotExists &&
+      (await this.objectKindFor(session, target.database, target.schema, target.name))
+    ) {
       return statusOutcome(`${target.name} already exists, statement succeeded.`, STATEMENT_TYPES.create);
     }
     const connection = await this.connectionFor(session);
@@ -462,8 +674,8 @@ export class StatementRouter {
   // ALTER TABLE: clustering, RENAME TO, SWAP WITH
   // ---------------------------------------------------------------------------
 
-  private async requireTable(table: ResolvedTable): Promise<void> {
-    if ((await this.engine.objectKind(table.database, table.schema, table.name)) !== 'TABLE') {
+  private async requireTable(session: Session, table: ResolvedTable): Promise<void> {
+    if ((await this.objectKindFor(session, table.database, table.schema, table.name)) !== 'TABLE') {
       throw objectNotFound('TABLE', displayName(table));
     }
   }
@@ -526,10 +738,13 @@ export class StatementRouter {
     const action = match[3].toLowerCase();
     const done = statusOutcome('Statement executed successfully.', STATEMENT_TYPES.alter);
 
-    if (match[1] && (await this.engine.objectKind(table.database, table.schema, table.name)) !== 'TABLE') {
+    if (
+      match[1] &&
+      (await this.objectKindFor(session, table.database, table.schema, table.name)) !== 'TABLE'
+    ) {
       return done;
     }
-    await this.requireTable(table);
+    await this.requireTable(session, table);
 
     // Clustering is a storage concern with no equivalent here.
     if (!action.startsWith('rename') && !action.startsWith('swap')) return done;
@@ -541,7 +756,7 @@ export class StatementRouter {
     const connection = await this.connectionFor(session);
 
     if (action.startsWith('rename')) {
-      if (await this.engine.objectKind(other.database, other.schema, other.name)) {
+      if (await this.objectKindFor(session, other.database, other.schema, other.name)) {
         throw new SnowflakeError(
           '002002',
           `SQL compilation error:\nObject '${displayName(other)}' already exists.`,
@@ -556,7 +771,7 @@ export class StatementRouter {
       return done;
     }
 
-    await this.requireTable(other);
+    await this.requireTable(session, other);
     if (table.database !== other.database) {
       // Three cross-database moves cannot be made atomic here.
       throw unsupported('ALTER TABLE ... SWAP WITH a table in another database');
@@ -1145,6 +1360,10 @@ export class StatementRouter {
       const name = create[2];
       const rest = create[3] ?? '';
 
+      // `CREATE DATABASE … CLONE …`: the name matched, but creating an empty
+      // database would be a quiet lie. Table-level CLONE is handled in execute().
+      if (/\bclone\b/i.test(rest)) throw unsupported(`CREATE ${object.toUpperCase()} … CLONE`);
+
       switch (object) {
         case 'database': {
           const key = normalizeName(name);
@@ -1704,6 +1923,7 @@ export class StatementRouter {
         user: session.user,
         warehouse: session.warehouse,
         databases: [...this.catalog.databases.values()],
+        clockMs: session.clockMs(),
       },
       options.bindings ?? [],
     );

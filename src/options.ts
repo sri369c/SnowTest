@@ -33,7 +33,7 @@ export const OPTIONS: OptionSpec[] = [
     argument: '<n>',
     env: 'SNOWTEST_PORT',
     default: String(DEFAULTS.port),
-    description: 'Port to listen on',
+    description: 'Port to listen on (0 picks a free one)',
     configKey: 'port',
     type: 'number',
   },
@@ -148,6 +148,12 @@ export const ENV_ONLY: EnvOnlySpec[] = [
     name: 'SNOWTEST_STAGE_ROOT',
     default: 'a temp directory per process',
     description: 'Directory that backs internal stages.',
+  },
+  {
+    name: 'SNOWTEST_CLOCK',
+    default: 'unset — the host clock',
+    description:
+      "Freeze or shift the emulated clock: an ISO instant ('2026-01-31T09:00:00Z') or an offset ('+30m', '-2h', '+1d').",
   },
 ];
 

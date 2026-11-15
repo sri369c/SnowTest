@@ -46,6 +46,7 @@ import {
   driverQueryResponse,
   loginResponse,
   sqlApiErrorBody,
+  sqlApiMultiResult,
   sqlApiResult,
   successEnvelope,
   tokenResponse,
@@ -553,6 +554,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         database: config.defaultDatabase,
         schema: config.defaultSchema,
         warehouse: config.defaultWarehouse,
+        clock: config.clock,
       },
       catalog,
     );
@@ -698,6 +700,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         warehouse,
         clientAppId,
         clientAppVersion,
+        clock: config.clock,
       },
       catalog,
     );
@@ -810,9 +813,13 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
     const startedAt = Date.now();
     try {
-      const outcome = await router.execute(sql, session, {
+      const outcomes = await router.executeMany(sql, session, {
         bindings: normalizeBindings(body.bindings),
       });
+      // The driver protocol carries one result: Snowflake answers with the last
+      // statement's, which is what a script's caller actually reads.
+      const outcome = outcomes[outcomes.length - 1];
+      if (!outcome) throw new SnowflakeError('000000', 'No statement was executed.', '42000');
       logQuery('driver', session, startedAt, sql, outcome);
 
       // PUT/GET: the client acts on this descriptor directly (it moves the
@@ -995,6 +1002,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         database,
         schema,
         warehouse: requested('warehouse') || config.defaultWarehouse,
+        clock: config.clock,
       },
       catalog,
     );
@@ -1026,9 +1034,16 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
     const startedAt = Date.now();
     try {
-      const outcome = await router.execute(statement, session, { bindings });
+      const outcomes = await router.executeMany(statement, session, { bindings });
+      const outcome = outcomes[outcomes.length - 1];
+      if (!outcome) throw new SnowflakeError('000000', 'No statement was executed.', '42000');
       logQuery('api', session, startedAt, statement, outcome);
-      const response = sqlApiResult(session, outcome, queryId, statementHandle);
+      // A script gets one result object per statement, which is the shape the SQL
+      // API documents; a single statement keeps the flat body clients expect.
+      const response =
+        outcomes.length > 1
+          ? sqlApiMultiResult(session, outcomes, queryId, statementHandle)
+          : sqlApiResult(session, outcome, queryId, statementHandle);
       statements.set(statementHandle, {
         outcome,
         session,

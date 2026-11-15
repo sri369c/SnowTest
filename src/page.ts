@@ -94,6 +94,7 @@ const STYLES = `
   .badge { display: inline-block; font-size: .72rem; line-height: 1.4; padding: 0 .4rem;
            border-radius: 999px; background: #eaeef2; color: #57606a; font-weight: 600; }
   .rn { width: 2.5rem; text-align: right; color: #57606a; font-variant-numeric: tabular-nums; }
+  .since { width: 7rem; white-space: nowrap; color: #57606a; font-variant-numeric: tabular-nums; }
   .livebar { display: flex; align-items: center; justify-content: flex-end; gap: .6rem; margin: .25rem 0; }
   .livebar .muted { font-size: .8rem; }
   .refresh { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .85rem;

@@ -139,6 +139,32 @@ export function sqlApiResult(
   };
 }
 
+/**
+ * The SQL REST API v2 answer to a request holding several statements: one result
+ * object per statement, under `data`, instead of the single-result shape.
+ */
+export function sqlApiMultiResult(
+  session: Session,
+  outcomes: Outcome[],
+  queryId: string,
+  statementHandle: string,
+): Record<string, unknown> {
+  const results = outcomes.map((outcome) => {
+    const body = sqlApiResult(session, outcome, queryId, statementHandle);
+    delete body.statementStatusUrl;
+    delete body.statementHandle;
+    return body;
+  });
+  return {
+    statementHandle,
+    statementStatusUrl: `/api/v2/statements/${statementHandle}`,
+    queryId,
+    sqlState: '00000',
+    message: 'Statement executed successfully.',
+    data: results,
+  };
+}
+
 export function driverErrorResponse(error: SnowflakeError): Record<string, unknown> {
   return {
     success: false,

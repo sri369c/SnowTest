@@ -30,11 +30,32 @@ fi
 # -file checks only mean something on 4.x. Override with SNOWTEST_DBT_CONNECTOR.
 CONNECTOR="${SNOWTEST_DBT_CONNECTOR:-4.8.*}"
 
-if ! "$PY" -c "import dbt.adapters.snowflake" >/dev/null 2>&1; then
-  echo "installing snowflake-connector-python (${CONNECTOR}) + dbt-snowflake into .venv…"
-  # One resolve so both pins are honoured together.
+# Both pinned on purpose: dbt-snowflake allows a pre-release core, so an
+# unpinned resolve installs a beta. The guard compares what .venv holds against
+# these, not just whether dbt imports, or a stale venv keeps a pair the README
+# does not claim. Bump both together and re-run the suite.
+DBT_CORE=1.12.7
+DBT_ADAPTER=1.12.5
+HAVE=$("$PY" - <<'PY' 2>/dev/null || true
+from importlib.metadata import version, PackageNotFoundError
+
+
+def have(name):
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "missing"
+
+
+print(have("dbt-core"), have("dbt-snowflake"))
+PY
+)
+
+if [ "$HAVE" != "$DBT_CORE $DBT_ADAPTER" ]; then
+  echo "dbt in .venv: ${HAVE:-nothing}; installing dbt-core ${DBT_CORE} + dbt-snowflake ${DBT_ADAPTER}…"
+  # One resolve so the three pins are honoured together.
   "$PY" -m pip install -q --disable-pip-version-check \
-    "snowflake-connector-python==${CONNECTOR}" 'dbt-snowflake==1.12.*'
+    "snowflake-connector-python==${CONNECTOR}" "dbt-snowflake==${DBT_ADAPTER}" "dbt-core==${DBT_CORE}"
 fi
 
 if [ ! -f "$KEY" ]; then

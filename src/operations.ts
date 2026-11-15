@@ -23,6 +23,12 @@ export interface OperationRow {
   status: OperationStatus;
   /** The gap, when status is `partial`. */
   note?: string;
+  /**
+   * The snowtest release that gave this row the status it shows today. Provenance
+   * comes from the tagged trees, not from memory: a row promoted from partial to
+   * supported carries the version of the promotion, not of the original row.
+   */
+  since: string;
 }
 
 export interface OperationGroup {
@@ -59,49 +65,58 @@ export const GROUPS: OperationGroup[] = [
         syntax: 'POST /session/v1/login-request',
         behaviour: 'Password, account and key-pair logins; issues a session token.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'GET /session/v1/login-request',
         behaviour: 'Renews the session token on the driver renewal path.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'POST /session/token-request',
         behaviour: 'Renews the session token.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'POST /session/heartbeat',
         behaviour: 'Keeps a long-lived session alive.',
         status: 'supported',
+        since: '1.0.0',
       },
-      { syntax: 'POST /session, GET /session', behaviour: 'Logout.', status: 'supported' },
+      { syntax: 'POST /session, GET /session', behaviour: 'Logout.', status: 'supported', since: '1.0.0' },
       {
         syntax: 'POST /queries/v1/query-request',
         behaviour: 'Runs one statement and returns its rows inline.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'GET /queries/v1/query-result/:queryId',
         behaviour: 'Fetches a stored result for a query id.',
         status: 'partial',
+        since: '1.0.0',
         note: 'One partition. A real account may return partitions 0…n.',
       },
       {
         syntax: 'POST /queries/v1/abort-request',
         behaviour: 'Acknowledges an abort.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Statements run to completion on the request thread; nothing is interrupted.',
       },
       {
         syntax: 'GET /monitoring/queries/:id',
         behaviour: 'Recent query log, which the connector reads for diagnostics.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'POST /telemetry/send',
         behaviour: 'Accepted and discarded.',
         status: 'supported',
+        since: '1.0.0',
       },
     ],
   },
@@ -117,31 +132,37 @@ export const GROUPS: OperationGroup[] = [
         syntax: 'POST /api/v2/statements',
         behaviour: 'Runs a statement synchronously and returns the rows in `data`.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'POST /api/v2/statements?async=true',
         behaviour: 'Returns a handle immediately, with the statement still running.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'GET /api/v2/statements/:handle',
         behaviour: 'Polls the handle until it completes, then returns the rows.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'POST /api/v2/statements/:handle/cancel',
         behaviour: 'Marks the handle cancelled.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'Request body: statement, bindings',
         behaviour: 'Positional and named bindings, typed by the driver.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'database, schema, role, warehouse, timeout',
         behaviour: 'Per-request overrides of the session context.',
         status: 'supported',
+        since: '1.0.0',
       },
     ],
   },
@@ -152,42 +173,49 @@ export const GROUPS: OperationGroup[] = [
     summary: 'Endpoints for tests and operators, outside the Snowflake surface.',
     columns: ENDPOINT_COLUMNS,
     rows: [
-      { syntax: 'GET /', behaviour: 'The landing page: what this is, and how to connect.', status: 'supported' },
-      { syntax: 'GET /operations', behaviour: 'This page.', status: 'supported' },
+      { syntax: 'GET /', behaviour: 'The landing page: what this is, and how to connect.', status: 'supported', since: '1.0.0' },
+      { syntax: 'GET /operations', behaviour: 'This page.', status: 'supported', since: '1.0.0' },
       {
         syntax: 'GET /configuration',
         behaviour: 'Flags and environment, the launcher, the control plane and staging, for the running build. `GET /usage` redirects here.',
         status: 'supported',
+        since: '3.0.0',
       },
       {
         syntax: 'GET /troubleshooting',
         behaviour: 'Common symptoms, their causes and fixes.',
         status: 'supported',
+        since: '3.0.0',
       },
       {
         syntax: 'GET /browse/:database/:schema[/:table]',
         behaviour: 'Catalog browser: objects, row counts, and a preview of the first rows of any table or view.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'GET /_snowtest/health',
         behaviour: 'Liveness probe, with both the emulated Snowflake version and the snowtest version.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'GET /_snowtest/state',
         behaviour: 'Databases, schemas, warehouses, roles, stages and session count.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'POST /_snowtest/seed',
         behaviour: 'Runs a SQL script sent as `{"sql": "..."}`.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'POST /_snowtest/reset',
         behaviour: 'Drops everything, persisted database files included, and recreates the configured catalog.',
         status: 'supported',
+        since: '1.0.0',
       },
     ],
   },
@@ -202,37 +230,44 @@ export const GROUPS: OperationGroup[] = [
         syntax: 'Permissive logins (default)',
         behaviour: 'Any user and password is accepted.',
         status: 'supported',
+        since: '1.0.0',
         note: 'Nothing is authorised. Never expose the server publicly.',
       },
       {
         syntax: 'SNOWTEST_USERS',
         behaviour: 'Comma-separated login allow-list; other names are refused at login.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'Key-pair JWT',
         behaviour: 'RS256, RS384 and RS512, with the signature checked against the configured public key.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'Key-pair claims',
         behaviour: '`exp` is enforced and `iss` must name the login user.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'Session token renewal',
         behaviour: 'Both driver renewal paths mint a fresh token for the same session.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'USE DATABASE | SCHEMA | WAREHOUSE | ROLE',
         behaviour: 'Switches the session context, including bare `USE`; a missing database or schema is an error (`002043`).',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'ALTER SESSION SET key = value',
         behaviour: 'Stored on the session and echoed by `SHOW PARAMETERS`.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Not applied to result formatting: DATE_OUTPUT_FORMAT and TIMESTAMP_*_OUTPUT_FORMAT are accepted and ignored.',
       },
     ],
@@ -249,59 +284,69 @@ export const GROUPS: OperationGroup[] = [
         behaviour:
           'Creates or drops the database and its DuckDB catalog, its file when persisted, and its stages. Dropping the current database leaves the session with none (`CURRENT_DATABASE()` is NULL; unqualified names fail with `090105`); a missing database is an error unless `IF EXISTS`.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'Persistence (SNOWTEST_DATA_DIR)',
         behaviour:
           'Each database is a DuckDB file in the directory; databases, schemas, tables, rows and stage definitions survive a restart. Unset, everything is in memory.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'CREATE | DROP SCHEMA',
         behaviour:
           'Creates or drops a schema in place. `DROP SCHEMA` cascades to its tables, views and stages by default; a missing schema is an error unless `IF EXISTS`.',
         status: 'partial',
+        since: '1.0.0',
         note: '`RESTRICT` refuses any schema that still holds tables or views (`002003`, SQLSTATE `2BP01`); Snowflake refuses only on foreign-key references.',
       },
       {
         syntax: 'CREATE | DROP WAREHOUSE',
         behaviour: 'Recorded in the catalog; it shows up in `SHOW WAREHOUSES`.',
         status: 'supported',
+        since: '1.0.0',
         note: 'No sizing, queues or credits.',
       },
       {
         syntax: 'CREATE | DROP ROLE',
         behaviour: 'Recorded and shown by `SHOW ROLES`.',
         status: 'supported',
+        since: '1.0.0',
         note: 'No privileges attach to a role.',
       },
       {
         syntax: 'CREATE | DROP STAGE',
         behaviour: 'Creates or removes the stage directory that `PUT` writes into.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'CREATE | DROP FILE FORMAT',
         behaviour: 'Accepted and recorded.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Copy options are read from `COPY INTO`, not from the format object.',
       },
       {
         syntax: 'CREATE | DROP USER',
         behaviour: 'Accepted and recorded.',
         status: 'partial',
+        since: '1.0.0',
         note: 'No credentials, roles or policies attach to the user.',
       },
       {
         syntax: 'ALTER DATABASE | SCHEMA | WAREHOUSE | ROLE',
         behaviour: 'Accepted.',
         status: 'partial',
+        since: '1.0.0',
         note: 'No-ops: there is no sizing, retention or ownership to change. `ALTER SCHEMA … RENAME TO` is not supported.',
       },
       {
         syntax: 'COMMENT ON …',
         behaviour: 'Accepted.',
         status: 'partial',
+        since: '1.0.0',
         note: 'No-ops; comments are not stored.',
       },
     ],
@@ -318,40 +363,47 @@ export const GROUPS: OperationGroup[] = [
         syntax: 'SHOW [TERSE] DATABASES | SCHEMAS | TABLES | VIEWS | COLUMNS | OBJECTS | FUNCTIONS | WAREHOUSES | ROLES | STAGES | PARAMETERS | GRANTS | USERS',
         behaviour: 'Answers from the catalog, honouring `IN …`, `LIKE …` and `LIMIT`. `SHOW STAGES` lists the current schema by default, every schema with `IN DATABASE [db]`, everything with `IN ACCOUNT`.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'SHOW PRIMARY KEYS | UNIQUE KEYS | IMPORTED KEYS',
         behaviour: 'Returns Snowflake’s columns, with no rows.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Constraints are not tracked; reflection only needs the shape.',
       },
       {
         syntax: 'SHOW SEQUENCES',
         behaviour: 'Returns a single `name` column, empty.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Sequences are not implemented, including `seq.NEXTVAL`.',
       },
       {
         syntax: 'SHOW FILE FORMATS',
         behaviour: 'Returns Snowflake’s columns, with no rows.',
         status: 'partial',
+        since: '1.0.0',
         note: 'File formats are not listed; create and copy still work.',
       },
       {
         syntax: 'DESCRIBE TABLE | VIEW',
         behaviour: 'Name, type, kind, nullability, default, key flags and comment. The table name matches exactly: `"orders"` is not `ORDERS`.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'DESCRIBE STAGE | FILE FORMAT | SEQUENCE',
         behaviour: 'Not implemented.',
         status: 'unsupported',
+        since: '1.0.0',
         note: '`DESCRIBE` resolves a table or view, and fails with object-not-found otherwise.',
       },
       {
         syntax: 'information_schema.columns | tables | views | schemata | databases',
         behaviour: 'Rewritten to carry the Snowflake-only columns, such as `bytes` and `last_altered`.',
         status: 'supported',
+        since: '3.1.0',
       },
     ],
   },
@@ -367,23 +419,27 @@ export const GROUPS: OperationGroup[] = [
         syntax: 'SELECT, INSERT, UPDATE, DELETE, MERGE',
         behaviour: 'Executed by DuckDB; bare column names in a `MERGE` insert list are qualified first.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'INSERT OVERWRITE INTO',
         behaviour: 'Rewritten to `DELETE` then `INSERT`.',
         status: 'supported',
+        since: '1.0.0',
         note: 'What `dbt seed` emits for a table that already exists.',
       },
       {
         syntax: 'CREATE [OR REPLACE] TABLE … AS SELECT',
         behaviour: 'Creates and fills the table.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'CREATE [OR REPLACE] TABLE t (col type [NOT NULL] …) AS SELECT',
         behaviour:
           'Runs the query first, then creates the typed table and inserts by position, in one transaction: `CREATE OR REPLACE TABLE t (…) AS SELECT … FROM t` reads the old rows, and a NULL in a NOT NULL column fails the statement (`100072`) and keeps any table it was replacing.',
         status: 'partial',
+        since: '1.0.0',
         note: 'PRIMARY KEY, UNIQUE and FOREIGN KEY are dropped, as Snowflake does not enforce them; `DESCRIBE` reports them as N.',
       },
       {
@@ -391,42 +447,63 @@ export const GROUPS: OperationGroup[] = [
         behaviour:
           'Renames in place within a schema. Across schemas, columns (type, NOT NULL) and rows are copied and the source dropped, in one transaction. Across databases (DuckDB writes one database per transaction), the copy is committed and its row count verified, then the source is dropped.',
         status: 'partial',
+        since: '1.0.0',
         note: 'A moved table does not carry column defaults or comments. A cross-database rename is not atomic: if the source cannot be dropped, the copy is removed and the error reported.',
       },
       {
         syntax: 'ALTER TABLE … SWAP WITH …',
         behaviour: 'Exchanges the two tables in one transaction, across schemas of one database too.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Across databases it is refused with an error: three cross-database moves cannot be made atomic.',
       },
       {
         syntax: 'ALTER TABLE … CLUSTER BY (…) | DROP CLUSTERING KEY | SUSPEND RECLUSTER | RESUME RECLUSTER',
         behaviour: 'Accepted once the table is found to exist; a missing table is object-not-found.',
         status: 'partial',
+        since: '1.0.0',
         note: 'No-ops: there is no clustering to change.',
       },
       {
         syntax: 'CREATE | DROP VIEW',
         behaviour: 'Ordinary views over the same catalog.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'CREATE [TRANSIENT | VOLATILE | TEMPORARY] TABLE',
         behaviour: 'Treated as an ordinary table.',
         status: 'partial',
+        since: '1.0.0',
         note: 'No transient or temporary lifetime; nothing is dropped at session end.',
       },
       {
         syntax: 'CLUSTER BY, COPY GRANTS, DATA_RETENTION_TIME_IN_DAYS, CHANGE_TRACKING, ENABLE_SCHEMA_EVOLUTION',
         behaviour: 'Parsed and dropped from `CREATE`.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Accepted so ordinary DDL runs; none of it has an effect.',
       },
       {
         syntax: 'BEGIN | COMMIT | ROLLBACK',
-        behaviour: 'Accepted.',
+        behaviour: 'A real transaction on the session’s own connection.',
+        status: 'supported',
+        since: '3.3.0',
+        note: 'A rolled-back load leaves nothing behind, and a statement that fails inside the transaction aborts it until ROLLBACK. Account-level DDL (databases, schemas, warehouses, roles, stages) is not rolled back.',
+      },
+      {
+        syntax: '`;`-separated statements in one request',
+        behaviour: 'Each statement routed and run in turn; the driver protocol answers with the last result, the SQL API with one per statement.',
+        status: 'supported',
+        since: '3.3.0',
+        note: '`MULTI_STATEMENT_COUNT` is enforced when the client sets it. Separators inside strings, quoted names, comments and `$$…$$` do not split.',
+      },
+      {
+        syntax: 'CREATE TABLE … CLONE …',
+        behaviour: 'Columns and rows copied into a new table.',
         status: 'partial',
-        note: 'DuckDB autocommits: there is no transaction isolation across sessions.',
+        since: '3.3.0',
+        note: 'A copy, not Snowflake’s zero-copy clone. `AT`/`BEFORE` and `CREATE DATABASE | SCHEMA … CLONE` are refused rather than approximated.',
       },
     ],
   },
@@ -441,30 +518,35 @@ export const GROUPS: OperationGroup[] = [
         syntax: 'IFF, DECODE, EQUAL_NULL',
         behaviour: '`CASE WHEN`, `CASE` with `IS NOT DISTINCT FROM` (so NULL matches NULL), `IS NOT DISTINCT FROM`.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'NVL, NVL2, ZEROIFNULL, NULLIFZERO, DIV0',
         behaviour: '`COALESCE`, `CASE`, `NULLIF`.',
         status: 'supported',
+        since: '1.0.0',
       },
-      { syntax: 'SQUARE', behaviour: '`x * x`.', status: 'supported' },
+      { syntax: 'SQUARE', behaviour: '`x * x`.', status: 'supported', since: '1.0.0' },
       {
         syntax: 'LISTAGG, ARRAY_AGG, BOOLOR_AGG, BOOLAND_AGG',
         behaviour:
           '`string_agg`, `array_agg`, `bool_or`, `bool_and`; `WITHIN GROUP (ORDER BY …)` moves inside the call, so the order is kept. `ARRAY_AGG` skips NULLs and returns `[]` for no rows, as in Snowflake.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'CURRENT_TIMESTAMP, LOCALTIMESTAMP, CURRENT_TIME, LOCALTIME, CURRENT_DATE, SYSDATE, GETDATE — bare or with ()',
         behaviour:
           'DuckDB clock functions; `SYSDATE()` is the UTC wall clock as TIMESTAMP_NTZ. A precision of 0, 3 or 6–9 truncates accordingly.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Precisions 1, 2, 4 and 5 are refused with an error.',
       },
       {
         syntax: 'DATEADD, DATEDIFF, CONVERT_TIMEZONE',
         behaviour: 'Interval arithmetic, `date_diff`, `timezone()`.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax:
@@ -472,34 +554,40 @@ export const GROUPS: OperationGroup[] = [
         behaviour:
           'Casts; `TRY_` variants use `TRY_CAST` and return NULL on bad input. Date/time formats are translated (YYYY, YY, MM, MON, MMMM, DD, DY, HH24, HH12, AM, PM, MI, SS, FF3, FF6, FF9, FF (= FF9), TZH:TZM, "quoted text"); `TO_TIMESTAMP(n, scale)` reads an epoch value; `TO_BINARY` reads HEX, BASE64 and UTF-8.',
         status: 'partial',
+        since: '1.0.0',
         note: 'Any other format element (HH, FF1, …), and any number format model, is refused with an error naming it rather than ignored.',
       },
       {
         syntax: 'ARRAY_CONSTRUCT, OBJECT_CONSTRUCT, PARSE_JSON, TO_JSON',
         behaviour: 'JSON arrays and objects.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'Variant paths: col:field.subfield',
         behaviour: '`json_extract`, or `json_extract_string` when cast to a string.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'Types: NUMBER, DECIMAL, NUMERIC, VARIANT, OBJECT, ARRAY, STRING, TEXT, BINARY, FLOAT, TIME, TIMESTAMP_NTZ | LTZ | TZ',
         behaviour:
           '`DECIMAL` — (38,0) when no precision is given, as in Snowflake, so `\'1.5\'::number` is 2 — then `JSON`, `VARCHAR`, `BLOB`, `DOUBLE`, `TIMESTAMP[TZ]`. Mapped only where a type is named (`::`, `CAST(… AS …)`, column definitions in `CREATE TABLE` and `ALTER TABLE … ADD | … TYPE`), so a column called `number` or `variant` stays a column. A cast to `TIME` accepts TIMESTAMP_TZ/LTZ (UTC wall clock; the engine runs in UTC) and refuses 24:00:00 (`TRY_CAST` gives NULL).',
         status: 'supported',
+        since: '1.0.0',
         note: '`TIME(n)` casts truncate to n digits; timestamp casts take n of 0, 3 (truncated) or 6–9. Columns need n of 6–9 (DuckDB stores TIME/TZ in microseconds and rounds `TIMESTAMP(0|3)`); lower is an error. `TIMESTAMP_NTZ(9)` is nanoseconds, `(7)`/`(8)` an error. `DESCRIBE` reports `(9)`. `CREATE TABLE … AS SELECT x::timestamp_ntz(0)` columns are full precision: later fractional INSERT/MERGE values are kept, not truncated. `CREATE TABLE` TIME columns refuse 24:00:00 on insert; columns added by `ALTER TABLE … ADD` fail only when such a value is read.',
       },
       {
         syntax: 'CURRENT_DATABASE, CURRENT_SCHEMA, CURRENT_ROLE, CURRENT_USER, CURRENT_WAREHOUSE, CURRENT_ACCOUNT, CURRENT_VERSION',
         behaviour: 'Substituted from the connection’s session state; NULL when there is no current database or schema.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: "String literals: '…\\'…', '\\\\', '\\n', '\\t', '\\xhh', '\\uhhhh', '\\ooo'",
         behaviour: 'Backslash escapes are applied as in Snowflake before DuckDB sees the value.',
         status: 'partial',
+        since: '1.0.0',
         note: 'A NUL character (`\\0`) is refused with an error.',
       },
       {
@@ -507,6 +595,7 @@ export const GROUPS: OperationGroup[] = [
         behaviour:
           'Folded to upper case everywhere, so table, column and alias names come back as Snowflake reports them (`select a` → `A`); quoted names keep their case and are never rewritten.',
         status: 'supported',
+        since: '1.0.0',
       },
     ],
   },
@@ -522,27 +611,32 @@ export const GROUPS: OperationGroup[] = [
         syntax: 'PUT file://… @stage',
         behaviour: 'Hands the client a local-filesystem stage to copy the file into.',
         status: 'supported',
+        since: '1.0.0',
         note: 'Client and server must see the same absolute path; no bytes travel over HTTP.',
       },
       {
         syntax: 'GET @stage/… file://…',
         behaviour: 'Hands the client back the staged files to copy out.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'LIST | LS @stage [PATTERN = …]',
         behaviour: 'Lists the stage directory, with Snowflake’s list columns.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'REMOVE | RM @stage [PATTERN = …]',
         behaviour: 'Deletes staged files.',
         status: 'supported',
+        since: '1.0.0',
       },
       {
         syntax: 'COPY INTO <table> FROM @stage',
         behaviour: 'Loads CSV, JSON and Parquet, honouring `TYPE`, `SKIP_HEADER`, `FIELD_DELIMITER`, `FIELD_OPTIONALLY_ENCLOSED_BY`, `NULL_IF`, `PATTERN` and `PURGE`.',
         status: 'supported',
+        since: '1.0.0',
       },
     ],
   },
@@ -572,11 +666,6 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
   {
     feature: 'ODBC and TLS',
     outcome: 'HTTP only. Terminate TLS in a proxy if a client insists on HTTPS.',
-  },
-  {
-    feature: 'Multiple statements per request',
-    outcome:
-      'Not split: DuckDB runs every statement but only one result comes back, chosen by DuckDB rather than by Snowflake’s rules; routing (`SHOW`, `USE`, `DESCRIBE`, account DDL, `ALTER TABLE`) is decided by the first statement alone. `MULTI_STATEMENT_COUNT` is ignored. dbt and the connector’s `execute_string` split client-side.',
   },
   {
     feature: 'Driver async execution (`execute_async`)',
@@ -637,6 +726,7 @@ function renderRow(row: OperationRow, index: number): string {
         <td><code>${escapeHtml(row.syntax)}</code></td>
         <td>${inlineMarkup(row.behaviour)}${note}</td>
         <td><span class="pill pill-${row.status}">${STATUS_TEXT[row.status]}</span></td>
+        <td class="since">${escapeHtml(row.since)}</td>
       </tr>`;
 }
 
@@ -649,7 +739,7 @@ function renderGroup(group: OperationGroup): string {
 <p class="muted">${escapeHtml(group.summary)}</p>
 <table>
   <thead>
-    <tr><th scope="col" class="rn">#</th><th scope="col">${escapeHtml(group.columns[0])}</th><th scope="col">${escapeHtml(group.columns[1])}</th><th scope="col">${escapeHtml(group.columns[2])}</th></tr>
+    <tr><th scope="col" class="rn">#</th><th scope="col">${escapeHtml(group.columns[0])}</th><th scope="col">${escapeHtml(group.columns[1])}</th><th scope="col">${escapeHtml(group.columns[2])}</th><th scope="col" class="since">Since</th></tr>
   </thead>
   <tbody>
 ${rows}
@@ -691,7 +781,9 @@ ${unsupportedRows}
   Everything this server answers: the driver protocol, the SQL REST API, the control
   plane, and the SQL it can run. A row marked partial works but has a gap, and every
   one of those rows says what the gap is — those are the calls that can quietly
-  pass a test for the wrong reason.
+  pass a test for the wrong reason. <strong>Since</strong> names the snowtest
+  release that gave a row the status it shows today, read from that release's own
+  table, so a promoted row carries the version of the promotion.
 </p>
 
 <div class="card">

@@ -252,8 +252,18 @@ export class Engine {
 export class EngineConnection {
   private current: string | null = null;
   private closed = false;
+  /**
+   * True while a transaction this connection owns is open. DuckDB has no
+   * SAVEPOINT, so nesting is tracked here instead of in the database: the
+   * router joins an open transaction rather than starting a second one.
+   */
+  private open = false;
 
   constructor(private readonly connection: DuckDBConnection) {}
+
+  get inTransaction(): boolean {
+    return this.open;
+  }
 
   /** Snowflake `USE`. No current database or schema → the empty read-only catalog. */
   async use(database: string | null, schema: string | null): Promise<void> {
@@ -267,6 +277,66 @@ export class EngineConnection {
     } catch (error) {
       throw mapEngineError(error);
     }
+  }
+
+  /**
+   * Snowflake's `BEGIN`. A transaction that is already open is committed first,
+   * which is what BEGIN does in autocommit mode.
+   */
+  async beginTransaction(): Promise<void> {
+    if (this.closed) throw sessionExpired();
+    if (this.open) await this.commitTransaction();
+    try {
+      await this.connection.run('BEGIN TRANSACTION');
+      this.open = true;
+    } catch (error) {
+      throw mapEngineError(error);
+    }
+  }
+
+  /**
+   * Snowflake's `COMMIT`. With nothing open it is a no-op. On a transaction a
+   * failed statement already aborted, DuckDB refuses and the transaction stays
+   * open, so the client still has to roll back, as it would against Snowflake.
+   */
+  async commitTransaction(): Promise<void> {
+    if (this.closed) throw sessionExpired();
+    if (!this.open) return;
+    try {
+      await this.connection.run('COMMIT');
+      this.open = false;
+    } catch (error) {
+      throw mapEngineError(error);
+    }
+  }
+
+  /** Snowflake's `ROLLBACK`. With nothing open it is a no-op, as in Snowflake. */
+  async rollbackTransaction(): Promise<void> {
+    if (this.closed) throw sessionExpired();
+    if (!this.open) return;
+    try {
+      await this.connection.run('ROLLBACK');
+      this.open = false;
+    } catch (error) {
+      throw mapEngineError(error);
+    }
+  }
+
+  /**
+   * `TABLE`, `VIEW` or null, on this connection rather than the admin one:
+   * inside a transaction the admin connection cannot see what the session has
+   * created but not committed.
+   */
+  async objectKind(database: string, schema: string, name: string): Promise<'TABLE' | 'VIEW' | null> {
+    const where = `database_name = ${toSqlLiteral(database)} AND schema_name = ${toSqlLiteral(schema)}`;
+    const tables = await this.execute(
+      `SELECT 1 FROM duckdb_tables() WHERE ${where} AND table_name = ${toSqlLiteral(name)}`,
+    );
+    if (tables.rows.length > 0) return 'TABLE';
+    const views = await this.execute(
+      `SELECT 1 FROM duckdb_views() WHERE ${where} AND view_name = ${toSqlLiteral(name)}`,
+    );
+    return views.rows.length > 0 ? 'VIEW' : null;
   }
 
   /** Execute already-rewritten SQL and collect the full result. */
@@ -305,6 +375,9 @@ export class EngineConnection {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    // DuckDB rolls back an open transaction when the connection goes away, so a
+    // logout or an idle sweep cannot leave half a client's transaction behind.
+    this.open = false;
     this.connection.closeSync();
   }
 }
