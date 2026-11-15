@@ -12,9 +12,9 @@ packages".
     ./setup.py status      # container state + /_snowtest/health
     ./setup.py logs -f     # follow the server log
     ./setup.py reset       # between test runs: drop everything, recreate catalog
-    ./setup.py down        # stop and remove the container
+    ./setup.py down        # stop the container; nothing is removed
     ./setup.py build       # rebuild the image
-    ./setup.py redeploy    # tear down, clear staged files, rebuild, start again
+    ./setup.py redeploy    # replace the container and image, clear stages, seed again
 
 Podman is preferred when both are installed; `--engine docker` forces Docker.
 Anything after `--` is appended to the server command line:
@@ -81,17 +81,20 @@ EXAMPLES_SCHEMA = f"{DATABASE}.EXAMPLES"
 EXAMPLES = """\
 examples:
   ./setup.py up
-  ./setup.py up --public-key keys/rsa_key.pub --users DBT_SVC
-  ./setup.py up --port 9090 --write-profile ./dbt_project
+  ./setup.py up                      # start it, creating the container only if it is missing
+  ./setup.py down                    # stop it; container, data volume and stages are kept
+  ./setup.py redeploy                # after a code change: new container, clear stages, rebuild, seed
+  ./setup.py redeploy --no-rebuild   # restart on the image already tagged
+  ./setup.py redeploy --no-recreate  # keep the container; rebuild and seed only
+  ./setup.py redeploy --no-seed-examples   # skip loading the bundled example tables
+  ./setup.py redeploy --public-key keys/rsa_key.pub --users DBT_SVC
+  ./setup.py redeploy --port 9090 --write-profile ./dbt_project
   ./setup.py up --name team-a --port 3131 --network team-a-net   # a second, isolated instance
   ./setup.py up --no-persist         # in-memory: a restart is a clean slate
   ./setup.py up --dry-run            # print the podman commands, run nothing
   ./setup.py status                  # engine, store, machine, Desktop pipe, container state, health
   ./setup.py logs -f
   ./setup.py reset                   # clean slate between test runs
-  ./setup.py redeploy                # pick up code changes: down, clear stages, build, up (keeps data volume)
-  ./setup.py up --no-seed-examples   # skip loading the bundled example tables
-  ./setup.py down
 """
 
 
@@ -490,9 +493,14 @@ def clear_stage_directory(stage: Path, args: argparse.Namespace) -> None:
 
 
 def seed_examples(args: argparse.Namespace) -> None:
-    """Load data/examples.sql. Tables are replaced, so reruns are safe."""
+    """`load_examples` behind the `--seed-examples` switch, which `redeploy` owns."""
     if not args.seed_examples:
         return
+    load_examples(args)
+
+
+def load_examples(args: argparse.Namespace) -> None:
+    """Load data/examples.sql. Tables are replaced, so reruns are safe."""
     if args.dry_run:
         note(f"  # seed {EXAMPLES_SCHEMA} from {EXAMPLES_SQL}")
         return
@@ -589,56 +597,81 @@ def print_summary(args: argparse.Namespace, stage: Path, health: dict) -> None:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
+    """Start the container, creating it only when it does not exist yet.
+
+    Nothing here builds, seeds, replaces or clears: a stopped container is started
+    in place, a running one is only probed. Everything that changes the deployment
+    belongs to `redeploy`, so `up` cannot quietly discard a test's data.
+    """
     engine = resolve_engine(args.engine, args.dry_run)
     stage = stage_directory(args)
+    if not image_present(engine, args.image, args.dry_run):
+        die(f"image {args.image} is not present; run ./setup.py build or ./setup.py redeploy first")
 
-    if args.rebuild or not image_present(engine, args.image, args.dry_run):
-        build_image(engine, args.image, args)
-
-    def finish() -> int:
+    def finish(created: bool) -> int:
         warn_if_image_moved(engine, args)
         health = wait_for_health(args)
-        seed_examples(args)
+        # Only a container this command created gets the example tables: a fresh
+        # install then has something to query, and an instance that already holds a
+        # test's data is never touched. Seeding replaces tables, so it is not
+        # something `up` may do to a container it merely started.
+        if created:
+            note("new container: loading the example tables")
+            load_examples(args)
         print_summary(args, stage, health)
-        maybe_write_profile(args)
         return 0
 
     state = container_state(engine, args)
-    if state == "running" and not args.recreate:
-        note(f"container {args.name} is already running; probing it (use --recreate to restart)")
-        return finish()
-    if state is not None and not args.recreate:
-        # A machine restart leaves the container stopped, not gone. Starting it in
-        # place keeps its identity and takes a second; `redeploy` is still the way
-        # to pick up changed flags or a new image.
-        note(f"starting existing container {args.name} (state: {state}); use --recreate to replace it")
-        run([engine, "start", args.name], dry=args.dry_run)
-        return finish()
+    if state == "running":
+        note(f"container {args.name} is already running; probing it")
+        return finish(created=False)
     if state is not None:
-        remove_container(engine, args)
+        # A machine restart leaves the container stopped, not gone. Starting it in
+        # place keeps its identity and its data.
+        note(f"starting existing container {args.name} (state: {state})")
+        run([engine, "start", args.name], dry=args.dry_run)
+        return finish(created=False)
 
     create_container(engine, args, stage)
-    return finish()
+    return finish(created=True)
 
 
 def cmd_redeploy(args: argparse.Namespace) -> int:
-    """Take it down if it exists, reset it, rebuild the image, bring it up."""
+    """Replace the deployment: the container and the image, then the example data.
+
+    Both halves default to on, so a bare `redeploy` picks up a code change. The
+    switches are for leaving one out: `--no-rebuild` keeps the image already
+    tagged, `--no-recreate` keeps the container that is already there.
+    """
     engine = resolve_engine(args.engine, args.dry_run)
     stage = stage_directory(args)
 
-    state = container_state(engine, args)
-    if state is None and not args.dry_run:
-        note(f"no container named {args.name}; nothing to take down")
-    else:
-        remove_container(engine, args)
+    if args.recreate:
+        state = container_state(engine, args)
+        if state is None and not args.dry_run:
+            note(f"no container named {args.name}; nothing to take down")
+        else:
+            remove_container(engine, args)
 
     if args.keep_stages:
         note(f"keeping staged files under {stage}")
     else:
         clear_stage_directory(stage, args)
 
-    build_image(engine, args.image, args, no_cache=args.no_cache)
-    create_container(engine, args, stage)
+    if args.rebuild or not image_present(engine, args.image, args.dry_run):
+        build_image(engine, args.image, args, no_cache=args.no_cache)
+    else:
+        note(f"keeping {args.image}; --rebuild builds it again")
+
+    state = container_state(engine, args)
+    if state is None:
+        create_container(engine, args, stage)
+    elif state == "running":
+        note(f"container {args.name} is still running; --recreate replaces it on the new image")
+    else:
+        note(f"starting existing container {args.name} (state: {state})")
+        run([engine, "start", args.name], dry=args.dry_run)
+
     health = wait_for_health(args)
     if args.persist:
         note(f"data volume {data_volume(args)} is kept; ./setup.py reset clears it")
@@ -651,15 +684,21 @@ def cmd_redeploy(args: argparse.Namespace) -> int:
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    # Deliberate: `down` never deletes the data volume or the stage directory.
-    # Losing a test database by accident costs far more than a manual
-    # `<engine> volume rm <name>-data`, so there is no purge flag to add here.
+    # Deliberate: `down` stops. It removes nothing — not the container, not the
+    # data volume, not the stage files — so the next `up` is one second's work and
+    # a test database is never lost to a stray command.
     engine = resolve_engine(args.engine, args.dry_run)
-    if not remove_container(engine, args):
+    state = container_state(engine, args)
+    if state is None:
         note(f"no container named {args.name}")
-    else:
-        note("stage files are kept; delete the stage directory if you want them gone")
-        note(f"the data volume is kept too; `{engine} volume rm {data_volume(args)}` deletes it")
+        return 0
+    if state != "running":
+        note(f"container {args.name} is already stopped (state: {state})")
+        return 0
+    note(f"stopping container {args.name}")
+    run([engine, "stop", args.name], dry=args.dry_run)
+    note("the container, the data volume and the stage files are all kept;")
+    note("`./setup.py redeploy` replaces it and `./setup.py reset` clears the data")
     return 0
 
 
@@ -792,21 +831,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    up = sub.add_parser("up", help="build if needed, start, and wait until healthy")
+    up = sub.add_parser("up", help="start the container, creating it if it does not exist")
     add_common(up)
-    up.add_argument("--recreate", action="store_true", help="replace an already-running container")
-    up.add_argument("--rebuild", action="store_true", help="rebuild the image first")
-    up.add_argument("--write-profile", default=None, metavar="DIR",
-                    help="write DIR/profiles.yml for dbt")
-    up.add_argument("--force", action="store_true", help="overwrite an existing profiles.yml")
-    add_seed_examples(up)
     up.set_defaults(func=cmd_up)
 
     redeploy = sub.add_parser(
         "redeploy",
-        help="take down, clear staged files, rebuild the image, start again (keeps the data volume)",
+        help="replace the container and image after a code change (keeps the data volume)",
     )
     add_common(redeploy)
+    redeploy.add_argument("--recreate", action=argparse.BooleanOptionalAction, default=True,
+                          help="replace the container instead of reusing it (default: on)")
+    redeploy.add_argument("--rebuild", action=argparse.BooleanOptionalAction, default=True,
+                          help="rebuild the image before starting (default: on)")
     redeploy.add_argument("--no-cache", action="store_true", help="ignore the build cache")
     redeploy.add_argument("--keep-stages", action="store_true",
                           help="keep staged files instead of clearing them")
@@ -816,7 +853,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_seed_examples(redeploy)
     redeploy.set_defaults(func=cmd_redeploy)
 
-    down = sub.add_parser("down", help="stop and remove the container")
+    down = sub.add_parser("down", help="stop the container; nothing is removed")
     add_common(down)
     down.set_defaults(func=cmd_down)
 

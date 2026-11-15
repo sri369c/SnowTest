@@ -491,6 +491,64 @@ export class StatementRouter {
     }
 
     const verb = /^([a-z]+)/i.exec(statement)?.[1]?.toUpperCase() ?? '';
+    // Timed around the work and closed before the history write, so the row
+    // reports the statement's cost and not the cost of recording it.
+    const startedAt = new Date();
+    const startedMs = Date.now();
+    try {
+      const outcome = await this.route(statement, session, options);
+      await this.noteQuery(statement, verb, session, startedAt, Date.now() - startedMs, outcome, null);
+      return outcome;
+    } catch (error) {
+      await this.noteQuery(statement, verb, session, startedAt, Date.now() - startedMs, null, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Note one statement in SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY.
+   *
+   * Bookkeeping never fails a client's statement: if the history write breaks, the
+   * warning lands in the server log and the result still reaches the caller. The
+   * record is a convenience here, not a participant.
+   */
+  private async noteQuery(
+    statement: string,
+    verb: string,
+    session: Session,
+    startedAt: Date,
+    elapsedMs: number,
+    outcome: Outcome | null,
+    error: unknown,
+  ): Promise<void> {
+    const failure = error instanceof SnowflakeError ? error : null;
+    try {
+      await this.engine.recordQuery({
+        queryText: statement.length > 200 ? `${statement.slice(0, 197)}...` : statement,
+        databaseName: session.database,
+        schemaName: session.schema,
+        queryType: verb,
+        sessionId: session.id,
+        userName: session.user,
+        roleName: session.role,
+        warehouseName: session.warehouse || null,
+        warehouseSize: this.catalog.warehouses.get(session.warehouse)?.size ?? null,
+        executionStatus: error ? 'FAIL' : 'SUCCESS',
+        errorCode: failure?.code ?? (error ? 'SNOWTEST_INTERNAL' : null),
+        errorMessage: failure?.message ?? (error ? String(error) : null),
+        startedAt,
+        endedAt: new Date(),
+        totalElapsedTime: elapsedMs,
+        rowsProduced: outcome ? (outcome.rows.length > 0 ? outcome.rows.length : outcome.rowsAffected) : 0,
+      });
+    } catch (historyError) {
+      process.stderr.write(`snowtest: query history write failed: ${String(historyError)}\n`);
+    }
+  }
+
+  /** One statement, routed. `execute` wraps this so every statement is timed and noted. */
+  private async route(statement: string, session: Session, options: ExecuteOptions): Promise<Outcome> {
+    const verb = /^([a-z]+)/i.exec(statement)?.[1]?.toUpperCase() ?? '';
 
     // Explicit transactions are real. The session's own connection carries them,
     // so a failed statement aborts the transaction and ROLLBACK discards what the

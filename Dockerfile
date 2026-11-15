@@ -33,6 +33,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
+# Bundled example tables: `POST /_snowtest/seed` with no SQL in the body loads this,
+# which is what the landing page's Seed button posts.
+COPY data ./data
 
 # Stage files and SNOWTEST_DATA_DIR databases are written here; the unprivileged user must own them.
 RUN mkdir -p "$SNOWTEST_STAGE_ROOT" /var/lib/snowtest/data && chown -R node:node /var/lib/snowtest

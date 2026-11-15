@@ -33,6 +33,8 @@ const home = (): string =>
     warehouses: ['SNOWTEST_WH'],
     roles: ['SYSADMIN'],
     stages: 0,
+    queries: [],
+    queryCount: 0,
     sessions: [],
   });
 
@@ -56,7 +58,7 @@ describe('operations data', () => {
   });
 
   it('dates every row to a release, and only to a release that exists', () => {
-    const known = new Set(['1.0.0', '2.0.0', '3.0.0', '3.0.1', '3.1.0', '3.1.1', '3.2.0', '3.3.0', '4.0.0']);
+    const known = new Set(['1.0.0', '2.0.0', '3.0.0', '3.0.1', '3.1.0', '3.1.1', '3.2.0', '3.3.0', '4.0.0', '4.1.0']);
     for (const group of GROUPS) {
       for (const row of group.rows) {
         expect(row.since, `${group.id}: ${row.syntax}`).toMatch(/^\d+\.\d+\.\d+$/);
@@ -158,7 +160,9 @@ describe('landing page', () => {
 
   it('keeps live state refreshable in place', () => {
     expect(html).toContain('id="live-body"');
-    expect(html).toContain('id="live-refresh"');
+    // One script binds every button by attribute, so the markup carries the contract.
+    expect(html).toContain('data-refresh="live-body"');
+    expect(html).toContain("document.querySelectorAll('[data-refresh]')");
     expect(html).not.toContain('Reload to refresh');
   });
 });

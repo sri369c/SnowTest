@@ -84,12 +84,12 @@ arguments. The same image runs under Docker.</p>
     <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
   </thead>
   <tbody>
-      <tr><td><code>./setup.py up</code></td><td>Build if needed, start, wait until healthy, load the example tables, print a dbt profile.</td></tr>
-      <tr><td><code>./setup.py redeploy</code></td><td>Down, clear staged files, rebuild, up. The data volume is kept. Use it after a code change.</td></tr>
+      <tr><td><code>./setup.py up</code></td><td>Start the container, creating it only when it is missing, and wait until healthy. A container it creates gets the example tables; an existing one is never built over, seeded or replaced.</td></tr>
+      <tr><td><code>./setup.py redeploy</code></td><td>Replace the deployment after a code change: new container, cleared stage files, rebuilt image, example tables seeded. The data volume is kept.</td></tr>
       <tr><td><code>./setup.py status</code></td><td>Engine, store (rootful or rootless), machine, Desktop pipe, container state, published ports and the health endpoint. Exits non-zero when the container answers but a client on the host cannot reach it.</td></tr>
       <tr><td><code>./setup.py logs</code></td><td>Server log, for a container that will not start.</td></tr>
       <tr><td><code>./setup.py reset</code></td><td>Drop all data, persisted files included, and recreate the catalog.</td></tr>
-      <tr><td><code>./setup.py down</code></td><td>Stop and remove the container; the data volume and stage directory stay.</td></tr>
+      <tr><td><code>./setup.py down</code></td><td>Stop the container. Nothing is removed: the container, the data volume and the stage directory all stay.</td></tr>
   </tbody>
 </table>
 <p class="muted">Worth knowing: <code>--name</code> (default <code>snowtest</code>; also names the
@@ -97,9 +97,13 @@ arguments. The same image runs under Docker.</p>
 <code>--port</code>, <code>--bind</code> (default <code>127.0.0.1</code>: the control plane is
 unauthenticated, so widening it is deliberate), <code>--network</code>, <code>--no-persist</code>,
 <code>--public-key</code>,
-<code>--users</code>, <code>--env KEY=VALUE</code>, <code>--no-seed-examples</code>,
-<code>--recreate</code>, <code>--write-profile DIR</code>. Invalid names and ports are refused.
-The full list is <code>./setup.py up --help</code>.</p>`;
+<code>--users</code>, <code>--env KEY=VALUE</code>. <code>up</code> and <code>down</code> take no
+behaviour flags at all: they start and stop what is there, and the only thing
+<code>up</code> writes is the example data, once, into a container it just created. Everything that changes the
+deployment belongs to <code>redeploy</code> — <code>--recreate</code>, <code>--rebuild</code>,
+<code>--no-cache</code>, <code>--keep-stages</code>, <code>--no-seed-examples</code>,
+<code>--write-profile DIR</code>. Invalid names and ports are refused.
+The full list is <code>./setup.py redeploy --help</code>.</p>`;
 
 const CONTROL_PLANE = `<table>
   <thead>
@@ -108,7 +112,7 @@ const CONTROL_PLANE = `<table>
   <tbody>
       <tr><td><code>GET /_snowtest/health</code></td><td>Liveness, plus both versions: the emulated Snowflake release and snowtest's own.</td></tr>
       <tr><td><code>GET /_snowtest/state</code></td><td>Databases, schemas, warehouses, roles, stages and the session count.</td></tr>
-      <tr><td><code>POST /_snowtest/seed</code></td><td>Run a SQL script sent as <code>{"sql": "…"}</code>; statements split on <code>;</code>.</td></tr>
+      <tr><td><code>POST /_snowtest/seed</code></td><td>Run a SQL script sent as <code>{"sql": "…"}</code>; statements split on <code>;</code>. Leave <code>sql</code> out of the body to load the bundled example tables instead.</td></tr>
       <tr><td><code>POST /_snowtest/reset</code></td><td>Drop everything, persisted database files included, and recreate the configured catalog.</td></tr>
   </tbody>
 </table>

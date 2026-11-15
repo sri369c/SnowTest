@@ -26,11 +26,12 @@ No Node install required — run it as a container. Podman and Docker both work;
 `setup.py` handles the build, the port, and the shared stage directory for you:
 
 ```bash
-./setup.py up        # build, start, wait until healthy, seed example tables, print the dbt profile
-./setup.py redeploy  # after a code change: down, clear stages, rebuild, up (+ seed; --no-seed-examples skips)
+./setup.py up        # start it (creating the container only if it is missing), wait until healthy
+./setup.py redeploy  # after a code change: replace the container, clear stages, rebuild, seed
+                     # --no-rebuild / --no-recreate / --no-seed-examples leave a part out
 ./setup.py status    # engine, store, machine, Desktop pipe, container state, health
 ./setup.py reset     # drop all data (persisted files too) and recreate the catalog
-./setup.py down        # stop and remove; never deletes data (volume and stages stay)
+./setup.py down        # stop it; nothing is removed (container, volume and stages stay)
 ```
 
 Data survives restarts: `setup.py` mounts a named volume `<name>-data` and
@@ -205,7 +206,7 @@ which keeps SQL-only tests simple. Register the **public** key and the login
 path starts checking like the real thing:
 
 ```bash
-./setup.py up --recreate --public-key rsa_key.pub --users DBT_SVC
+./setup.py redeploy --public-key rsa_key.pub --users DBT_SVC
 ```
 
 (`--public-key` sets `SNOWTEST_JWT_PUBLIC_KEY`; `--users` sets the
@@ -226,7 +227,7 @@ test:dbt`); see [dbt compatibility](#dbt-compatibility) for what has been
 verified.
 
 ```yaml
-# profiles.yml — what `./setup.py up --public-key … --write-profile DIR` writes
+# profiles.yml — what `./setup.py redeploy --public-key … --write-profile DIR` writes
 snowtest:
   target: dev
   outputs:
@@ -321,7 +322,7 @@ insecure transport. TLS is not built in yet.
 |---|---|
 | `GET /_snowtest/health` | Liveness probe |
 | `GET /_snowtest/state` | Current databases, schemas, warehouses, roles, sessions |
-| `POST /_snowtest/seed` | Run a SQL script (`{"sql": "..."}`) on a scratch session |
+| `POST /_snowtest/seed` | Run a SQL script (`{"sql": "..."}`) on a scratch session; with no `sql` in the body, load the bundled `data/examples.sql` |
 | `POST /_snowtest/reset` | Drop all data, persisted database files included, and recreate the configured catalog |
 
 `POST /_snowtest/reset` between tests is the closest thing to a clean
@@ -329,6 +330,17 @@ Snowflake account:
 
 ```python
 requests.post("http://localhost:3030/_snowtest/reset")
+```
+
+The bundled example dataset loads the same way, with an empty body: five tables
+under `SNOWTEST.EXAMPLES`, built with `CREATE OR REPLACE`, so reseeding replaces
+them rather than appending and a second run leaves the same rows. On the landing
+page the `POST /_snowtest/seed` row on the **Control plane** tab is a button that
+asks first.
+
+```bash
+curl -s -X POST http://localhost:3030/_snowtest/seed \
+  -H 'Content-Type: application/json' -d '{}'
 ```
 
 ## Configuration
@@ -471,6 +483,31 @@ Anything untranslatable is passed through unchanged and fails with an honest
 Snowflake-shaped error; syntax recognised but not emulated fails with
 `... is not supported on snowtest`. Neither returns silently wrong data.
 
+### Query history
+
+Every statement is timed and noted in `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`, so
+timings are a table you can query rather than a log line you have to scrape:
+
+```sql
+select query_text, total_elapsed_time, rows_produced, execution_status
+from snowflake.account_usage.query_history
+order by query_id desc limit 20;
+```
+
+`total_elapsed_time` is milliseconds of wall clock around the statement, closed
+before the row is written, so a query never pays for its own bookkeeping. Failed
+statements are in there too, with `execution_status = 'FAIL'` and the code and
+message the client was given.
+
+The landing page has a **Query timings** tab for reading it without a client: the
+latest 50 statements newest first, under a line giving the table's total row
+count (and, past 50, how many of them are on screen), with its own **Refresh**
+that updates that pane in place. Nothing is pruned: rows stay until you empty the
+table from the **Clear Data** tab (or `POST /_snowtest/queries/clear`), and a
+reset empties it along with everything else. Both clear actions ask first, in a
+modal; the reset one only enables its button once you type `Delete All Data`
+exactly.
+
 ## Limits
 
 Being explicit, because a stub that quietly lies is worse than no stub:
@@ -545,14 +582,31 @@ Being explicit, because a stub that quietly lies is worse than no stub:
 ```bash
 npm run typecheck     # tsc --noEmit
 npm test              # vitest: SQL translation, statements run through DuckDB, persistence, config, pages
-npm run test:py       # boots the server, runs the real Python connector suite
+npm run test:py       # real Python connector suite, on its own server or one already up
 npm run test:dbt      # dbt-snowflake over key-pair: debug, run x2, seed x2, test, verify, stages
 ```
 
-`npm run test:py` is the important one: it starts the server, connects with the
-official `snowflake-connector-python`, and checks login, DDL, DML, types,
-`DESCRIBE`, `SHOW`, variant access, bind parameters, error codes, async
-execution, database isolation and reconnects.
+`npm run test:py` is the important one: it connects with the official
+`snowflake-connector-python` and checks login, DDL, DML, types, `DESCRIBE`,
+`SHOW`, variant access, bind parameters, error codes, async execution, database
+isolation and reconnects.
+
+Both Python suites first look for a server that is already healthy on their port
+and use it as it stands, so a suite can be pointed at the container you have
+open:
+
+```bash
+SNOWTEST_TEST_PORT=3030 npm run test:py   # compat suite against the running container
+SNOWTEST_DBT_PORT=3030 npm run test:dbt   # dbt against it, needs the public key
+```
+
+With nothing answering they start their own on 18080 and 18081 and stop it on
+exit; a server they did not start is left running. Written against a container,
+the statements land in its `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` and stay
+there, along with whatever objects the suite creates — the compat suite leaves a
+`COMPAT_DB` database, the dbt suite `DBT_TEST` and `STAGING` under `SNOWTEST`. The
+dbt suite also checks that an unregistered key is refused, so an instance started
+without `SNOWTEST_JWT_PUBLIC_KEY` fails that one check by accepting every key.
 
 `npx tsx scripts/dump-response.ts "SHOW TABLES"` prints a raw driver-protocol
 response, which is the fastest way to debug a wire-format question.

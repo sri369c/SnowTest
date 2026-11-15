@@ -86,7 +86,7 @@ src/engine.ts      DuckDB instance, per-session connections, catalog introspecti
 src/persist.ts     SNOWTEST_DATA_DIR: one DuckDB file per database, stage definitions
 src/types.ts       type mapping + per-surface row encoding
 src/protocol.ts    response envelopes (driver vs SQL API v2)
-src/home.ts        landing page at / (connection details, live catalog state)
+src/home.ts        landing page at / (connect, live catalog state, query timings, clear data)
 src/operations.ts  supported-operations reference at /operations, from data
 src/usage.ts       /configuration and /troubleshooting pages
 src/browse.ts      catalog browser at /browse
@@ -451,6 +451,12 @@ flowchart LR
 `node dist/cli.js` directly. `npx tsx` spawns a child process, so killing the
 wrapper leaves an orphaned server holding the port and serving *stale code*.
 That produced two convincing but false failures during development.
+
+**Reuse by design:** both runners probe `/_snowtest/health` on their port first
+and use whatever answers, so `SNOWTEST_TEST_PORT=3030 npm run test:py` exercises
+the container itself — its data and its timings table are exactly the point of
+pointing a suite there. `SERVER_PID` stays empty when a server was borrowed, and
+the exit trap only stops a process the runner started.
 
 ---
 

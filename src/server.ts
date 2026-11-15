@@ -11,6 +11,7 @@
  */
 
 import { createPublicKey, randomUUID, verify as verifySignature } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { createServer as createNodeServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { gunzipSync, inflateSync } from 'node:zlib';
 
@@ -34,7 +35,7 @@ import {
   renderSchema,
   type BrowseTable,
 } from './browse.js';
-import { renderHome, type HomeDatabaseState } from './home.js';
+import { renderHome, type HomeDatabaseState, type HomeQueryState } from './home.js';
 import { renderOperations } from './operations.js';
 import { renderConfiguration, renderTroubleshooting } from './usage.js';
 import { PACKAGE_VERSION } from './version.js';
@@ -386,12 +387,49 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       databases.push({ name: database.name, schemas });
     }
 
+    // Timings are a convenience: a history table that cannot be read must not
+    // take the landing page down with it.
+    let queries: HomeQueryState[] = [];
+    let queryCount = 0;
+    try {
+      queries = await engine.queryHistory(PREVIEW_LIMIT);
+      queryCount = await engine.queryHistoryCount();
+    } catch {
+      queries = [];
+      queryCount = 0;
+    }
+
+    // The Clear Data tab redirects back here with what just happened, so the
+    // confirmation survives the reload that refreshes the counts.
+    const cleared = c.req.query('cleared');
+    const seeded = c.req.query('seeded');
+    const notice =
+      cleared === 'timings'
+        ? {
+            kind: 'timings' as const,
+            text: 'Query timings cleared; other items like databases, stages and sessions are untouched.',
+          }
+        : cleared === 'reset'
+          ? {
+              kind: 'reset' as const,
+              text: 'All data deleted. Every database and its files, stage, session and recorded statement is gone.',
+            }
+          : seeded === 'examples'
+            ? {
+                kind: 'seed' as const,
+                text: 'Example tables seeded: five tables under SNOWTEST.EXAMPLES, replaced rather than appended.',
+              }
+            : null;
+
     return c.html(
       renderHome(config, new URL(c.req.url).origin, SERVER_VERSION, {
         databases,
         warehouses: [...catalog.warehouses.keys()].sort(),
         roles: [...catalog.roles.keys()].sort(),
         stages: catalog.stages.size,
+        queries,
+        queryCount,
+        notice,
         sessions: sessions.all().map((session) => ({
           user: session.user,
           database: session.database,
@@ -540,12 +578,34 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }),
   );
 
+  app.post('/_snowtest/queries/clear', async (c) =>
+    c.json({ cleared: await engine.clearQueryHistory() }),
+  );
+
   app.post('/_snowtest/seed', async (c) => {
     const parsed = await readJson(c);
     if (!parsed.ok) return c.json({ error: 'Request body must be JSON.' }, 400);
     const body = parsed.body;
-    const sql = typeof body.sql === 'string' ? body.sql : '';
-    if (!sql) return c.json({ error: 'Provide {"sql": "<statements>"}' }, 400);
+    // A body with no `sql` at all loads the bundled example tables, which is what the
+    // landing page's Seed button asks for. Anything carrying `sql` runs exactly that,
+    // so an empty script is still the 400 it always was.
+    const hasSql = typeof body.sql === 'string';
+    const given = hasSql ? (body.sql as string).trim() : '';
+    if (hasSql && !given) {
+      return c.json({ error: 'sql was empty; send statements, or leave sql out to load the examples.' }, 400);
+    }
+    let sql = given;
+    if (!sql) {
+      try {
+        // Sits beside `dist/` in the image; in the checkout it is `data/examples.sql`.
+        sql = (await readFile(new URL('../data/examples.sql', import.meta.url), 'utf8')).trim();
+      } catch {
+        return c.json(
+          { error: 'No sql in the body, and no bundled data/examples.sql to fall back on.' },
+          500,
+        );
+      }
+    }
 
     const session = new Session(
       {
@@ -569,7 +629,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }
     // Seeding runs on its own session, so its connection is this handler's to close.
     closeSession(session);
-    return c.json({ executed });
+    return c.json({ executed, source: hasSql ? 'request' : 'examples' });
   });
 
   app.post('/_snowtest/reset', async (c) => {
@@ -594,6 +654,9 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     statements.clear();
     asyncResults.clear();
     queryLog.clear();
+    // A reset is "everything gone", and the timings table is part of everything:
+    // it outlives database drops, so it has to be emptied here by name.
+    await engine.clearQueryHistory();
 
     for (const database of config.databases) {
       catalog.createDatabase(database.name);

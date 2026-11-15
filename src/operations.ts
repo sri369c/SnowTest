@@ -207,7 +207,8 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'POST /_snowtest/seed',
-        behaviour: 'Runs a SQL script sent as `{"sql": "..."}`.',
+        behaviour:
+          'Runs a SQL script sent as `{"sql": "..."}`; with no `sql` in the body, loads the bundled example tables.',
         status: 'supported',
         since: '1.0.0',
       },
@@ -330,6 +331,14 @@ export const GROUPS: OperationGroup[] = [
         status: 'partial',
         since: '4.0.0',
         note: 'Reports what was granted, not what is enforced: every role can still do everything. A renamed table keeps its grants under the old name.',
+      },
+      {
+        syntax: 'SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY',
+        behaviour:
+          'Every statement the server runs is timed and noted here, failures included: `query_id`, `query_text`, `database_name`, `schema_name`, `query_type`, `session_id`, `user_name`, `role_name`, `warehouse_name`, `warehouse_size`, `execution_status`, `error_code`, `error_message`, `start_time`, `end_time`, `total_elapsed_time` in milliseconds and `rows_produced`. A statement that reads this table does not see itself, because the row lands after the statement ends.',
+        status: 'partial',
+        since: '4.1.0',
+        note: 'Only the columns a stub can honestly fill: `bytes_scanned`, `bytes_written`, `credits_used_cloud_services` and the queue timings are absent rather than invented, and `total_elapsed_time` is wall clock rather than a compile/execute split. Rows are never pruned — the Clear Data tab, `POST /_snowtest/queries/clear` or a reset empties the table, and nothing else does.',
       },
       {
         syntax: 'CREATE | DROP STAGE',
