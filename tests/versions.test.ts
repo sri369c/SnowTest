@@ -33,7 +33,7 @@ const versions = JSON.parse(read('versions.json')) as {
   dbt: { core: string; snowflake: string };
 };
 
-const manifest = JSON.parse(read('package.json')) as { version: string };
+const manifest = JSON.parse(read('package.json')) as { version: string; engines?: { node?: string } };
 
 function releaseNotes(): string[] {
   return readdirSync(path('release_notes'))
@@ -149,5 +149,30 @@ describe('release notes are the record of releases', () => {
   it('carries no note for a version newer than the package', () => {
     const newest = [...notes].sort(compare).at(-1);
     expect(newest).toBe(manifest.version);
+  });
+});
+
+describe('node is one version everywhere', () => {
+  // The toolchain in dev-tools runs node 24, so the image and CI do too: one
+  // runtime, not three numbers with three owners that nobody compares.
+  const MAJOR = '24';
+
+  it('builds both image stages on it', () => {
+    const dockerfile = read('Dockerfile');
+    const stages = dockerfile.match(/^FROM node:(\d+)/gm) ?? [];
+    expect(stages.length).toBe(2);
+    for (const stage of stages) expect(stage).toContain(`node:${MAJOR}`);
+  });
+
+  it('runs every CI job on it', () => {
+    const lines = read('.github/workflows/ci.yml')
+      .split(/\r?\n/)
+      .filter((line) => line.includes('node-version:'));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) expect(line).toContain(MAJOR);
+  });
+
+  it('declares it as the floor for a consumer', () => {
+    expect(manifest.engines?.node).toBe(`>=${MAJOR}`);
   });
 });
