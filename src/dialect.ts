@@ -31,6 +31,8 @@ export interface RewriteContext {
   databases?: ReadonlyArray<Pick<DatabaseDef, 'name' | 'comment' | 'createdAt'>>;
   /** Translate `col:field` variant paths into `json_extract`. */
   variantPaths?: boolean;
+  /** `SNOWTEST_CLOCK`: the millisecond instant the clock reports, instead of the host clock. */
+  clockMs?: number;
 }
 
 /** Placeholder marker for text we must not touch (string literals, comments). */
@@ -1030,30 +1032,49 @@ export function rewrite(
   }
 
   // Clock functions. DuckDB knows the bare keywords but not the call forms.
+  //
+  // With SNOWTEST_CLOCK set, "now" is a fixed instant instead of the host clock.
+  // It is spelled epoch_ms(<ms>) rather than a timestamp literal so no later pass
+  // has to unpick quotes, and it is resolved per statement, so an offset still
+  // moves forward during a long run.
+  const clockMs = ctx.clockMs;
+  const now = clockMs === undefined ? 'CURRENT_TIMESTAMP' : `epoch_ms(${literal(String(Math.trunc(clockMs)))})`;
+  const today = clockMs === undefined ? 'CURRENT_DATE' : `CAST(${now} AS DATE)`;
+  const clockTime = clockMs === undefined ? 'current_localtime()' : `CAST(${now} AS TIME)`;
+
   for (const name of ['CURRENT_TIMESTAMP', 'LOCALTIMESTAMP']) {
     text = replaceCall(text, name, parts, (args) => {
       const unit = precisionUnit(name, args);
-      return unit ? `date_trunc(${literal(`'${unit}'`)}, CURRENT_TIMESTAMP)` : 'CURRENT_TIMESTAMP';
+      return unit ? `date_trunc(${literal(`'${unit}'`)}, ${now})` : now;
     });
   }
   for (const name of ['CURRENT_TIME', 'LOCALTIME']) {
     text = replaceCall(text, name, parts, (args) => {
       const unit = precisionUnit(name, args);
-      return unit
-        ? `CAST(date_trunc(${literal(`'${unit}'`)}, current_localtimestamp()) AS TIME)`
-        : 'current_localtime()';
+      if (!unit) return clockTime;
+      const from = clockMs === undefined ? 'current_localtimestamp()' : now;
+      return `CAST(date_trunc(${literal(`'${unit}'`)}, ${from}) AS TIME)`;
     });
   }
-  text = text.replace(/\bLOCALTIMESTAMP\b/gi, 'CURRENT_TIMESTAMP');
-  text = text.replace(/\b(?:CURRENT_TIME|LOCALTIME)\b(?!\s*\()/gi, 'current_localtime()');
+  text = text.replace(/\bLOCALTIMESTAMP\b(?!\s*\()/gi, () => now);
+  text = text.replace(/\bCURRENT_TIMESTAMP\b(?!\s*\()/gi, () => now);
+  text = text.replace(/\b(?:CURRENT_TIME|LOCALTIME)\b(?!\s*\()/gi, () => clockTime);
+  text = text.replace(/\bCURRENT_DATE\b(?!\s*\()/gi, () => today);
   text = replaceCall(text, 'CURRENT_DATE', parts, (args) => {
     if (args.length > 0) throw compilationError('CURRENT_DATE takes no arguments.');
-    return 'CURRENT_DATE';
+    return today;
   });
   // SYSDATE is the UTC wall clock as TIMESTAMP_NTZ.
   text = replaceCall(text, 'SYSDATE', parts, (args) => {
     if (args.length > 0) throw compilationError('SYSDATE takes no arguments.');
-    return `timezone(${literal("'UTC'")}, CURRENT_TIMESTAMP)`;
+    return `timezone(${literal("'UTC'")}, ${now})`;
+  });
+  // GETDATE is an alias for CURRENT_TIMESTAMP. It is handled here, before the
+  // SIMPLE_RENAMES pass, or it would reach DuckDB as NOW() and ignore
+  // SNOWTEST_CLOCK.
+  text = replaceCall(text, 'GETDATE', parts, (args) => {
+    if (args.length > 0) throw compilationError('GETDATE takes no arguments.');
+    return now;
   });
 
   text = castTypes(text, literal);

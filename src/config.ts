@@ -6,6 +6,9 @@ import { readFileSync } from 'node:fs';
 
 import { normalizeName } from './catalog.js';
 
+/** `SNOWTEST_CLOCK`: a frozen instant, or an offset that keeps moving. */
+export type Clock = { kind: 'fixed'; at: Date } | { kind: 'offset'; ms: number };
+
 export interface SnowtestConfig {
   port: number;
   host: string;
@@ -31,6 +34,8 @@ export interface SnowtestConfig {
   verbose: boolean;
   /** Directory for file-backed databases; null keeps everything in memory. */
   dataDir: string | null;
+  /** Emulated clock; null uses the host clock. */
+  clock: Clock | null;
 }
 
 /** Baseline values; `--help` and the `/configuration` page render these as the defaults. */
@@ -49,15 +54,41 @@ export const DEFAULTS: SnowtestConfig = {
   roles: ['ACCOUNTADMIN', 'SYSADMIN', 'PUBLIC'],
   verbose: false,
   dataDir: null,
+  clock: null,
 };
 
-/** A TCP port, 1–65535. Anything else is a startup error. */
+/** A TCP port, 1–65535, or 0 to let the OS pick a free one. Anything else is a startup error. */
 export function parsePort(value: string, source: string): number {
   const port = /^\d+$/.test(value.trim()) ? Number(value.trim()) : Number.NaN;
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`${source} must be a port number between 1 and 65535, got '${value}'.`);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`${source} must be a port number between 1 and 65535, or 0 for a free port, got '${value}'.`);
   }
   return port;
+}
+
+/**
+ * `SNOWTEST_CLOCK` freezes or shifts the emulated clock, so a test that depends on
+ * `CURRENT_TIMESTAMP` stops depending on the day it runs.
+ *
+ * An ISO instant (`2026-01-31T09:00:00Z`, or `2026-01-31 09:00:00` in local time)
+ * is frozen; `+30m`, `-2h`, `+45s`, `+1d` shift the host clock, which keeps moving.
+ */
+export function parseClock(value: string | undefined): Clock | null {
+  if (!value || value.trim().length === 0) return null;
+  const text = value.trim();
+  const offset = /^([+-])(\d+)([smhd])$/i.exec(text);
+  if (offset) {
+    const unit = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[
+      offset[3].toLowerCase() as 's' | 'm' | 'h' | 'd'
+    ];
+    const ms = Number(offset[2]) * unit;
+    return { kind: 'offset', ms: offset[1] === '-' ? -ms : ms };
+  }
+  const parsed = Date.parse(text.includes('T') ? text : text.replace(' ', 'T'));
+  if (!Number.isNaN(parsed)) return { kind: 'fixed', at: new Date(parsed) };
+  throw new Error(
+    `SNOWTEST_CLOCK must be an ISO instant or an offset like '+30m', got '${value}'.`,
+  );
 }
 
 function readBoolean(value: string | undefined, name: string): boolean {
@@ -114,6 +145,7 @@ export function loadConfig(overrides: Partial<SnowtestConfig> = {}): SnowtestCon
     jwtPublicKey: readPublicKey(env.SNOWTEST_JWT_PUBLIC_KEY),
     verbose: readBoolean(env.SNOWTEST_VERBOSE, 'SNOWTEST_VERBOSE'),
     dataDir: env.SNOWTEST_DATA_DIR || DEFAULTS.dataDir,
+    clock: parseClock(env.SNOWTEST_CLOCK),
     ...overrides,
   };
 

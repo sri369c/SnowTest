@@ -10,6 +10,7 @@
  */
 
 import { Catalog, normalizeName } from './catalog.js';
+import type { Clock } from './config.js';
 
 export interface SessionParameter {
   name: string;
@@ -47,6 +48,8 @@ export interface SessionOptions {
   warehouse: string;
   clientAppId?: string;
   clientAppVersion?: string;
+  /** emulated clock, when SNOWTEST_CLOCK is set. */
+  clock?: Clock | null;
 }
 
 export class Session {
@@ -64,6 +67,10 @@ export class Session {
   lastUsedAt = new Date();
   readonly parameters: Map<string, string>;
   readonly catalog: Catalog;
+  /** Frozen or offset clock; null means the host clock. */
+  readonly clock: Clock | null;
+  /** Parameters the client set itself, as opposed to the defaults above. */
+  private readonly explicitParameters = new Set<string>();
 
   /** Set once by the server so the session can execute statements. */
   connection: unknown = null;
@@ -78,7 +85,17 @@ export class Session {
     this.clientAppId = options.clientAppId ?? 'snowtest';
     this.clientAppVersion = options.clientAppVersion ?? '0.1.0';
     this.catalog = catalog;
+    this.clock = options.clock ?? null;
     this.parameters = new Map(Object.entries(DEFAULT_PARAMETERS));
+  }
+
+  /**
+   * Milliseconds the emulated clock reports, or undefined to use the host clock.
+   * An offset is resolved per statement, so time still moves during a long test.
+   */
+  clockMs(): number | undefined {
+    if (!this.clock) return undefined;
+    return this.clock.kind === 'fixed' ? this.clock.at.getTime() : Date.now() + this.clock.ms;
   }
 
   /** Session parameters in the `{name, value}` shape clients expect. */
@@ -87,7 +104,18 @@ export class Session {
   }
 
   setParameter(name: string, value: string): void {
-    this.parameters.set(normalizeName(name), value);
+    const key = normalizeName(name);
+    this.parameters.set(key, value);
+    // Remembered so MULTI_STATEMENT_COUNT is enforced only when the client set
+    // it: the default of 1 would otherwise reject every multi-statement script.
+    this.explicitParameters.add(key);
+  }
+
+  /** MULTI_STATEMENT_COUNT when the client set it; 0 means "whatever the request holds". */
+  multiStatementCount(): number | null {
+    if (!this.explicitParameters.has('MULTI_STATEMENT_COUNT')) return null;
+    const value = Number(this.parameters.get('MULTI_STATEMENT_COUNT'));
+    return Number.isInteger(value) && value >= 0 ? value : null;
   }
 
   getParameter(name: string): string | undefined {

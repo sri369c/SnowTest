@@ -8,7 +8,7 @@ services:
     build: .
     # setup.py tags from package.json; this fallback is the one place that cannot
     # read it, so bump it here alongside a release (or export SNOWTEST_VERSION).
-    image: snowtest:${SNOWTEST_VERSION:-3.2.0}
+    image: snowtest:${SNOWTEST_VERSION:-3.3.0}
     ports:
       # Loopback only: the /_snowtest/* control plane is unauthenticated.
       - "127.0.0.1:3030:3030"
@@ -16,6 +16,9 @@ services:
       SNOWTEST_PORT: "3030"
       # Remove to keep everything in memory (a restart is then a clean slate).
       SNOWTEST_DATA_DIR: /var/lib/snowtest/data
+      # Forwarded from the host, because compose has no `--env` equivalent:
+      # SNOWTEST_CLOCK=+30m podman compose up -d. Empty means the host clock.
+      SNOWTEST_CLOCK: ${SNOWTEST_CLOCK:-}
       # Set to verify key-pair logins; see the README or the running server's /configuration page.
       # SNOWTEST_JWT_PUBLIC_KEY: /keys/rsa_key.pub
     volumes:

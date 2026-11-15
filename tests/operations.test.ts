@@ -24,6 +24,7 @@ const config: SnowtestConfig = {
   roles: ['SYSADMIN'],
   verbose: false,
   dataDir: null,
+  clock: null,
 };
 
 const home = (): string =>
@@ -50,6 +51,16 @@ describe('operations data', () => {
         expect(row.syntax.trim(), group.id).not.toBe('');
         expect(row.behaviour.trim(), `${group.id}: ${row.syntax}`).not.toBe('');
         expect(STATUSES.has(row.status), `${group.id}: ${row.syntax}`).toBe(true);
+      }
+    }
+  });
+
+  it('dates every row to a release, and only to a release that exists', () => {
+    const known = new Set(['1.0.0', '2.0.0', '3.0.0', '3.0.1', '3.1.0', '3.1.1', '3.2.0', '3.3.0']);
+    for (const group of GROUPS) {
+      for (const row of group.rows) {
+        expect(row.since, `${group.id}: ${row.syntax}`).toMatch(/^\d+\.\d+\.\d+$/);
+        expect(known.has(row.since), `${group.id}: ${row.syntax} says ${row.since}`).toBe(true);
       }
     }
   });
@@ -108,6 +119,15 @@ describe('operations page', () => {
       expect(html).toContain(inlineMarkup(item.feature));
     }
     expect(html).toContain('id="pane-not-supported"');
+  });
+
+  it('shows the release each row arrived in', () => {
+    expect(html).toContain('>Since</th>');
+    for (const group of GROUPS) {
+      for (const row of group.rows) {
+        expect(html, `${group.id}: ${row.syntax}`).toContain(`<td class="since">${row.since}</td>`);
+      }
+    }
   });
 
   it('marks itself in the nav and names the emulated version', () => {

@@ -88,12 +88,12 @@ in-memory storage unless `SNOWTEST_DATA_DIR` is.
 By hand, if you would rather see every flag:
 
 ```bash
-podman build --layers=false --format docker -t snowtest:3.2.0 .
+podman build --layers=false --format docker -t snowtest:3.3.0 .
 podman network create snowtest-network   # once
 podman run -d --name snowtest --network snowtest-network \
   -p 127.0.0.1:3030:3030 -e SNOWTEST_PORT=3030 \
   -v snowtest-data:/var/lib/snowtest/data -e SNOWTEST_DATA_DIR=/var/lib/snowtest/data \
-  --userns=keep-id:uid=1000,gid=1000 snowtest:3.2.0
+  --userns=keep-id:uid=1000,gid=1000 snowtest:3.3.0
 ```
 
 `--layers=false` keeps no intermediate images behind, so the image list stays
@@ -143,7 +143,8 @@ resolves natively and `USE DATABASE`/`USE SCHEMA` behave per session while the
 data itself is shared across connections.
 
 Once it is running, the server documents itself: `/operations` lists every
-endpoint, statement and function with its gaps, `/configuration` covers flags,
+endpoint, statement and function with its gaps and the release each support
+arrived in, `/configuration` covers flags,
 the launcher, the control plane and staged files, and `/troubleshooting` lists
 common failures. All are rendered from the running build, so they cannot
 describe a different version. Where this file and those pages disagree, the
@@ -247,28 +248,32 @@ profile keys, so nothing in your project changes. Any schema works (dbt creates
 it); the bundled `tests/dbt/profiles.yml` uses `DBT_TEST` on port 18081.
 
 What dbt exercises on every run, and what snowtest answers: `SHOW TERSE
-SCHEMAS`, `SHOW TERSE OBJECTS IN SCHEMA`, `SHOW USER FUNCTIONS`, `DESCRIBE
-TABLE`, `CREATE OR REPLACE VIEW`, `CREATE OR REPLACE TRANSIENT TABLE`,
-`MERGE`, transactions, and dbt's `/* {...} */` query comments on every statement.
+SCHEMAS`, `SHOW OBJECTS IN SCHEMA`, `SHOW USER FUNCTIONS`, `DESCRIBE TABLE`,
+`CREATE OR REPLACE VIEW`, `CREATE OR REPLACE TRANSIENT TABLE`, `MERGE`,
+`BEGIN`/`COMMIT`, and dbt's `/* {...} */` query comments on every statement.
 
 ### dbt compatibility
 
-Verified against **dbt-core 1.12.6 + dbt-snowflake 1.12.4** (password auth),
-from a clean `./setup.py reset`:
+`npm run test:dbt` pins **dbt-core 1.12.7 + dbt-snowflake 1.12.5** in
+`tests/dbt/run.sh` and runs them over key-pair auth: `dbt debug`, `dbt seed`
+twice, view / table / incremental models, four schema tests, and the stage cycle.
+
+The rows below were checked by hand on an earlier pin (dbt-core 1.12.6,
+dbt-snowflake 1.12.4, password auth); the suite does not cover them:
 
 | Command / feature | Result |
 |---|---|
-| `dbt debug`, `dbt seed` (twice: no duplicate rows) | pass |
-| `dbt run`: view; table with `transient`, `copy_grants`, `cluster_by`, `automatic_clustering` | pass |
-| `dbt run`: incremental `merge`, `delete+insert`, `append` (second run included) | pass |
+| `dbt run`: table with `transient`, `copy_grants`, `cluster_by`, `automatic_clustering` | pass |
+| `dbt run`: incremental `delete+insert`, `append` (second run included) | pass |
 | `dbt run`: `contract: enforced` with `not_null` / `primary_key` constraints | pass; a NULL in a `not_null` column fails the model |
 | `dbt snapshot`: `timestamp` and `check` strategies (second run closes changed rows) | pass |
-| `dbt test` (`unique`, `not_null`), `dbt source freshness` (`loaded_at_field`) | pass |
+| `dbt source freshness` (`loaded_at_field`) | pass |
 | `dbt docs generate`, `dbt run-operation` | pass |
 
-Not supported: dynamic tables, materialized views, Python models, `clone`
-(including `dbt clone` and zero-copy `CREATE … CLONE`), Iceberg tables,
-`GRANT`-based `grants:` configs. Source freshness needs `loaded_at_field`:
+Not supported: dynamic tables, materialized views, Python models, Iceberg
+tables, `GRANT`-based `grants:` configs. `CREATE TABLE … CLONE` works as a full
+copy (see Limits); `dbt clone` has not been run against it, and
+`CREATE DATABASE | SCHEMA … CLONE` is refused. Source freshness needs `loaded_at_field`:
 warehouse-metadata freshness reads `last_altered`, which is always NULL here. The
 adapter's per-model status reads `00000 1` where Snowflake prints `SUCCESS 1`.
 
@@ -329,7 +334,7 @@ Flags override environment variables. `setup.py` and `compose.yaml` set
 
 | Flag | Env | Default |
 |---|---|---|
-| `--port` | `SNOWTEST_PORT` | `8080` (`3030` via `setup.py` / compose) |
+| `--port` | `SNOWTEST_PORT` | `8080` (`3030` via `setup.py` / compose); `0` picks a free one |
 | `--host` | `SNOWTEST_HOST` | `0.0.0.0` |
 | `--account` | `SNOWTEST_ACCOUNT` | `SNOWTEST` |
 | `--database` | `SNOWTEST_DATABASE` | `SNOWTEST` |
@@ -339,6 +344,7 @@ Flags override environment variables. `setup.py` and `compose.yaml` set
 | `--verbose` | `SNOWTEST_VERBOSE` | off |
 | — | `SNOWTEST_ROLE` | `SYSADMIN` (role handed to a session that does not ask for one) |
 | — | `SNOWTEST_STAGE_ROOT` | temp dir, per process |
+| — | `SNOWTEST_CLOCK` | unset: the host clock |
 
 `SNOWTEST_DATABASES`, `SNOWTEST_WAREHOUSES`, `SNOWTEST_ROLES` and
 `SNOWTEST_USERS` take comma-separated lists.
@@ -433,6 +439,23 @@ that appear in practice:
   Dropping the session's current database leaves it with none
   (`CURRENT_DATABASE()` is NULL; unqualified names fail with `090105`, or
   `090106` with a database but no current schema — `IF [NOT] EXISTS` included).
+- `BEGIN` / `COMMIT` / `ROLLBACK` are real, on the session's own connection. A
+  rolled-back load leaves nothing behind, and a statement that fails inside a
+  transaction aborts it until the client rolls back. Account objects (databases,
+  schemas, warehouses, roles, stages) are created outside the transaction, so a
+  rollback does not undo them.
+- A request holding several `;`-separated statements is split and routed per
+  statement; separators inside strings, quoted names, comments and `$$…$$` do
+  not split. The driver protocol answers with the last result and the SQL API
+  with one result per statement. `MULTI_STATEMENT_COUNT` is enforced when the
+  client sets it.
+- `CREATE TABLE … CLONE …` copies columns and rows into a new table. It is a
+  copy, not Snowflake's zero-copy clone; `AT`/`BEFORE` and
+  `CREATE DATABASE | SCHEMA … CLONE` are refused rather than approximated.
+- `SNOWTEST_CLOCK` freezes the emulated clock (an ISO instant) or shifts it
+  (`+30m`, `-2h`, `+1d`). `CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`, `CURRENT_TIME`,
+  `LOCALTIME`, `CURRENT_DATE` and `SYSDATE` all follow it, so a test that asks
+  for "now" stops depending on the day it runs.
 - `USE DATABASE` / `USE SCHEMA` on a missing object fails with `002043`; it
   never creates one.
 - `SHOW STAGES` lists the current schema by default, every schema with
@@ -466,9 +489,9 @@ Being explicit, because a stub that quietly lies is worse than no stub:
   options beyond `TYPE`, `SKIP_HEADER`, `FIELD_DELIMITER`,
   `FIELD_OPTIONALLY_ENCLOSED_BY` and `NULL_IF` are ignored.
 - User stages (`@~`) and table stages (`@%table`) are not implemented.
-- A request carrying several `;`-separated statements is not split: DuckDB
-  runs them all but returns a single result, and routing follows the first
-  statement only. dbt and `execute_string` split client-side, so they are fine.
+- Transactions cover table DDL and DML, per session. Account-level DDL is
+  outside them, and there is no cross-session isolation to configure: another
+  session sees committed rows only, which is what Snowflake does too.
 - No ODBC.
 - `ALTER SCHEMA ... RENAME TO` is not supported (it errors).
 - `ALTER SCHEMA ... SWAP WITH` is not supported (it errors).
@@ -486,9 +509,10 @@ Being explicit, because a stub that quietly lies is worse than no stub:
 - Result paging returns a single partition; `arrow` result format is not
   emitted (JSON only).
 - Client protocols are version-sensitive. `tests/compat/run.sh` pins
-  `snowflake-connector-python==5.1.*`, and `tests/dbt/run.sh` installs it
-  together with `dbt-snowflake==1.12.*` in one resolve, so a client release
-  that changes the wire format fails loudly.
+  `snowflake-connector-python==5.1.*`; `tests/dbt/run.sh` pins 4.8, because the
+  stage-transfer checks only mean something on 4.x. Each installs in one resolve
+  with its adapter, so a client release that changes the wire format fails
+  loudly.
 
 ## Tests
 
