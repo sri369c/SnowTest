@@ -273,6 +273,7 @@ fails with `… is not supported on snowtest` (`002003`, SQLSTATE `0A000`).
 | Dates | `DATEADD`, `DATEDIFF`, `TO_DATE`, `TO_TIMESTAMP*` with format → `strptime` (`FF`/`FF9` → `%n`, `FF6` → `%f`, `FF3` → `%g`), `TO_TIMESTAMP(n, scale)` |
 | Casts | `TO_VARCHAR` with format → `strftime`; `TO_NUMBER`, `TO_DOUBLE`, `TO_BOOLEAN`, `TO_BINARY`; every `TRY_` variant → `TRY_CAST`; `::string`, `::number`, `::variant` |
 | Semi-structured | `payload:path`, `payload:path::string`, `ARRAY_CONSTRUCT`, `OBJECT_CONSTRUCT`, `PARSE_JSON`, `TO_JSON` |
+| Table functions | `LATERAL FLATTEN(input => …)` and `TABLE(FLATTEN(…))` → a lateral `json_each` join exposing `SEQ`, `KEY`, `PATH`, `INDEX`, `VALUE` and `THIS`; `path`, `outer` and `mode` are honoured, `recursive => TRUE` is refused |
 | Types | `NUMBER[(p[,s])]`, `DECIMAL`/`NUMERIC` without scale → `DECIMAL(38,0)`, `VARIANT`, `OBJECT`, `ARRAY`, `STRING`, `FLOAT`, `TIMESTAMP_NTZ/LTZ/TZ`, `BINARY`, `VARCHAR(16777216)` — only in type positions: `::`, `CAST(… AS …)`, column definitions of `CREATE TABLE` and `ALTER TABLE … ADD | … TYPE` |
 | String literals | Snowflake backslash escapes decoded (`\'`, `\\`, `\n`, `\t`, `\xhh`, `\uhhhh`, octal) and re-emitted as a DuckDB literal; NUL refused |
 | DDL decoration | `TRANSIENT`, `CLUSTER BY`, `COPY GRANTS`, `DATA_RETENTION_TIME_IN_DAYS`, `CHANGE_TRACKING` |
@@ -289,6 +290,8 @@ Statements the router handles before translation (`src/meta.ts`):
 | `ALTER TABLE t RENAME TO [db.][schema.]u` | DuckDB rename within a schema; across schemas, copy columns (type, NOT NULL) and rows, then drop, in one transaction; across databases (one written database per DuckDB transaction) commit a row-count-verified copy, then drop the source, removing the copy if that fails |
 | `ALTER TABLE t SWAP WITH u` | three moves through a parked name, in one transaction; across databases refused (`not supported on snowtest`) |
 | `DROP DATABASE` / `DROP SCHEMA` | missing object → `002003` unless `IF EXISTS`; schema `CASCADE` by default, `RESTRICT` honoured; stages inside removed; the session's current database/schema becomes NULL if dropped |
+| `DESCRIBE STAGE` / `DESCRIBE FILE FORMAT` / `DESCRIBE SEQUENCE` | a stage or a format answers in Snowflake's five-column property table from the catalog; a sequence answers with the one row Snowflake returns for it, read from `duckdb_sequences()` |
+| `SEQ.NEXTVAL` / `SEQ.CURRVAL` / `NEXT VALUE FOR SEQ` | → `nextval('DB.SCHEMA.SEQ')` / `currval(…)`, the name resolved from the session when it is not qualified. DuckDB keeps the counter, so a value is handed out even when the transaction rolls back, as in Snowflake; `CURRVAL` is per session |
 
 Three rules exist because of concrete client failures, not tidiness:
 
@@ -397,7 +400,7 @@ not part of the suite: `transient`, `copy_grants`, `cluster_by`,
 enforced`, `dbt snapshot` (`timestamp` and `check`), `dbt source freshness`,
 `dbt docs generate`, `dbt run-operation`.
 Not supported: dynamic tables, materialized views, Python models, clone,
-Iceberg, `grants:`.
+Iceberg. `grants:` runs, with the grants recorded and never enforced.
 
 Non-obvious requirements, all discovered by running dbt rather than reading
 about it:
@@ -466,6 +469,14 @@ That produced two convincing but false failures during development.
 - No UDFs, stored procedures, tasks, streams, dynamic tables, replication,
   Snowpark, Snowpipe Streaming, `PUT`/`GET` encryption.
 - Single result partition; JSON only (no Arrow).
+- `GRANT`/`REVOKE` are recorded, not enforced: `SHOW GRANTS` reports what was
+  said, and every role can still do everything. Ownership never changes hands,
+  and a rename (`RENAME TO`, `SWAP WITH`) leaves grants under the old name.
+- `LATERAL FLATTEN` is a `json_each` projection: `recursive => TRUE` is refused
+  rather than approximated.
+- `CREATE FILE FORMAT` stores `TYPE` and its options for `SHOW`/`DESCRIBE` and
+  never applies them: `COPY INTO` reads its own option list. Formats are in
+  memory, like roles, so a restart forgets them.
 - No ODBC.
 - Warehouse "behaviour" is metadata: no queues, sizing or cost.
 

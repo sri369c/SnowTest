@@ -118,6 +118,16 @@ const STYLES = `
   @media (prefers-color-scheme: dark) { .ops thead th { background: #0d1117; } }
   .ops h2 { scroll-margin-top: 1rem; }
   .note { display: block; color: #57606a; font-size: .82rem; margin-top: .15rem; }
+  /* A row's gap is the part people need to read, so it gets a callout block
+     instead of smaller grey text. Scoped to the operations tables: the catalog
+     browser uses the same class for column-type hints, where this is noise. */
+  .ops .note {
+    background: #eef1f4; border-left: 3px solid #8c959f; border-radius: 4px;
+    padding: .3rem .55rem; color: #24292f; margin-top: .3rem;
+  }
+  @media (prefers-color-scheme: dark) {
+    .ops .note { background: #161b22; border-left-color: #6e7681; color: #c9d1d9; }
+  }
   .null { color: #57606a; font-style: italic; }
   .scroller { overflow-x: auto; margin: 1.25rem 0; }
   .scroller table { min-width: 100%; }

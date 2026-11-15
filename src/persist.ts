@@ -10,7 +10,10 @@ import type { StageDef } from './catalog.js';
 const DATABASE_SUFFIX = '.duckdb';
 const STAGES_FILE = 'stages.json';
 
-export type PersistedStage = Pick<StageDef, 'database' | 'schema' | 'name' | 'url'>;
+/** `createdAt` is an ISO timestamp on disk; a stage written before it existed has none. */
+export type PersistedStage = Pick<StageDef, 'database' | 'schema' | 'name' | 'url'> & {
+  createdAt?: string | null;
+};
 
 export class DataDir {
   private constructor(readonly root: string) {}
@@ -54,11 +57,12 @@ export class DataDir {
   }
 
   async saveStages(stages: Iterable<StageDef>): Promise<void> {
-    const rows: PersistedStage[] = [...stages].map(({ database, schema, name, url }) => ({
+    const rows: PersistedStage[] = [...stages].map(({ database, schema, name, url, createdAt }) => ({
       database,
       schema,
       name,
       url,
+      createdAt: createdAt?.toISOString() ?? null,
     }));
     await writeFile(join(this.root, STAGES_FILE), `${JSON.stringify(rows, null, 2)}\n`);
   }

@@ -337,6 +337,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       }
       catalog.createStage({
         ...stage,
+        createdAt: stage.createdAt ? new Date(stage.createdAt) : new Date(),
         directory: await router.stages.directoryFor(stage.database, stage.schema, stage.name),
       });
     }

@@ -29,6 +29,19 @@ export interface RawColumn {
   duckType: string;
 }
 
+/** One sequence, as DuckDB's `duckdb_sequences()` reports it. */
+export interface SequenceInfo {
+  name: string;
+  startValue: number;
+  increment: number;
+  minValue: number;
+  maxValue: number;
+  cycle: boolean;
+  comment: string | null;
+  /** The last value handed out, or null before the first call. */
+  lastValue: number | null;
+}
+
 export interface QueryResult {
   columns: RawColumn[];
   rows: unknown[][];
@@ -214,6 +227,25 @@ export class Engine {
       })),
       ...views.map((row) => ({ name: String(row[0]), kind: 'VIEW', rowCount: null })),
     ];
+  }
+
+  /** Named sequences in one schema, read from DuckDB's own catalog. */
+  async listSequences(database: string, schema: string): Promise<SequenceInfo[]> {
+    const rows = await this.queryOnAdmin(
+      `SELECT sequence_name, start_value, increment_by, min_value, max_value, cycle, comment, last_value
+       FROM duckdb_sequences()
+       WHERE database_name = ${toSqlLiteral(database)} AND schema_name = ${toSqlLiteral(schema)}`,
+    );
+    return rows.map((row) => ({
+      name: String(row[0]),
+      startValue: Number(row[1]),
+      increment: Number(row[2]),
+      minValue: Number(row[3]),
+      maxValue: Number(row[4]),
+      cycle: Boolean(row[5]),
+      comment: row[6] === null ? null : String(row[6]),
+      lastValue: row[7] === null ? null : Number(row[7]),
+    }));
   }
 
   /** Columns of one table or view, matching the stored (already folded) names exactly. */

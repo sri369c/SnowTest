@@ -39,6 +39,48 @@ export interface StageDef {
   url: string | null;
   /** Absolute directory backing an internal stage (see stage.ts). */
   directory?: string | null;
+  /** When the stage was created; `DESCRIBE STAGE` reports it and it never moves. */
+  createdAt?: Date;
+}
+
+/**
+ * A named `CREATE FILE FORMAT`. Snowflake lets a format be created, shown and
+ * described; here it is recorded so those two answers are not invented. Kept in
+ * memory like roles and warehouses, so a restart forgets it.
+ */
+export interface FileFormatDef {
+  database: string;
+  schema: string;
+  name: string;
+  /** Upper-case `TYPE`, defaulting to CSV the way Snowflake does. */
+  type: string;
+  /** The option list exactly as written, `TYPE` included. */
+  options: string;
+  owner: string;
+  createdAt: Date;
+}
+
+/**
+ * One `GRANT`. Access control is recorded, never enforced: there is no
+ * privilege model here, so these rows exist to let `SHOW GRANTS` answer honestly
+ * about what a client said rather than about what it may do.
+ *
+ * A role grant is the same shape as a privilege grant — `USAGE` on a `ROLE` —
+ * which is how Snowflake reports it too.
+ */
+export interface GrantDef {
+  /** The privilege itself, or `USAGE` for `GRANT ROLE a TO b`. */
+  privilege: string;
+  /** Object kind (`TABLE`, `DATABASE`, `ACCOUNT`) or `ROLE` for a role grant. */
+  grantedOn: string;
+  /** Canonical object name; null for an account-wide grant. */
+  name: string | null;
+  grantedTo: 'ROLE' | 'USER';
+  granteeName: string;
+  grantOption: boolean;
+  /** The role that issued the grant. */
+  grantedBy: string;
+  createdAt: Date;
 }
 
 export interface CatalogInit {
@@ -72,6 +114,19 @@ export class Catalog {
   readonly warehouses = new Map<string, WarehouseDef>();
   readonly roles = new Map<string, { name: string }>();
   readonly stages = new Map<string, StageDef>();
+  readonly fileFormats = new Map<string, FileFormatDef>();
+  /**
+   * The `START` each sequence was created with. DuckDB keeps only the next value,
+   * and rewriting a sequence for `ALTER … RESTART WITH n` replaces that, so the
+   * value a bare `RESTART` returns to is remembered here.
+   */
+  readonly sequenceStarts = new Map<string, number>();
+  /**
+   * When each sequence was created, so `SHOW SEQUENCES` and `DESCRIBE SEQUENCE`
+   * report a `created_on` that does not move. DuckDB keeps no such thing.
+   */
+  readonly sequenceCreatedAt = new Map<string, Date>();
+  readonly grants: GrantDef[] = [];
 
   constructor(init: CatalogInit = {}) {
     for (const role of init.roles ?? ['ACCOUNTADMIN', 'SYSADMIN', 'PUBLIC']) {
@@ -160,8 +215,68 @@ export class Catalog {
     return { created: !existed, name: key };
   }
 
+  /** A dropped role takes its grants with it, as in Snowflake. */
   dropRole(key: string): boolean {
-    return this.roles.delete(key);
+    const dropped = this.roles.delete(key);
+    for (let index = this.grants.length - 1; index >= 0; index -= 1) {
+      const grant = this.grants[index];
+      const asGrantee = grant.grantedTo === 'ROLE' && grant.granteeName === key;
+      const asGrantedRole = grant.grantedOn === 'ROLE' && grant.name === key;
+      if (asGrantee || asGrantedRole) this.grants.splice(index, 1);
+    }
+    return dropped;
+  }
+
+  /** Record a grant, replacing an identical one so `WITH GRANT OPTION` can be re-granted. */
+  addGrant(grant: GrantDef): void {
+    const same = (other: GrantDef): boolean =>
+      other.privilege === grant.privilege &&
+      other.grantedOn === grant.grantedOn &&
+      other.name === grant.name &&
+      other.grantedTo === grant.grantedTo &&
+      other.granteeName === grant.granteeName;
+    const existing = this.grants.findIndex(same);
+    if (existing >= 0) this.grants.splice(existing, 1);
+    this.grants.push(grant);
+  }
+
+  /**
+   * Forget every grant recorded on an object, and on the objects beneath it —
+   * dropping a schema or a database drops the grants inside it too. Returns how
+   * many went.
+   */
+  purgeGrantsFor(name: string): number {
+    const before = this.grants.length;
+    const kept = this.grants.filter(
+      (grant) => grant.name !== name && !(grant.name?.startsWith(`${name}.`) ?? false),
+    );
+    this.grants.length = 0;
+    this.grants.push(...kept);
+    return before - kept.length;
+  }
+
+  /** Remove matching grants, ignoring any field left undefined; returns how many went. */
+  removeGrants(match: {
+    privilege?: string;
+    grantedOn?: string;
+    name?: string | null;
+    grantedTo: 'ROLE' | 'USER';
+    granteeName: string;
+  }): number {
+    const before = this.grants.length;
+    const kept = this.grants.filter(
+      (grant) =>
+        !(
+          (match.privilege === undefined || grant.privilege === match.privilege) &&
+          (match.grantedOn === undefined || grant.grantedOn === match.grantedOn) &&
+          (match.name === undefined || grant.name === match.name) &&
+          grant.grantedTo === match.grantedTo &&
+          grant.granteeName === match.granteeName
+        ),
+    );
+    this.grants.length = 0;
+    this.grants.push(...kept);
+    return before - kept.length;
   }
 
   createStage(stage: StageDef): void {
@@ -177,6 +292,28 @@ export class Catalog {
     for (const [key, stage] of this.stages) {
       if (stage.database === database && (schema === undefined || stage.schema === schema)) {
         this.stages.delete(key);
+      }
+    }
+  }
+
+  /** Record or replace a named file format; `DESCRIBE FILE FORMAT` reads it back. */
+  defineFileFormat(format: FileFormatDef): void {
+    this.fileFormats.set(`${format.database}.${format.schema}.${format.name}`, format);
+  }
+
+  getFileFormat(database: string, schema: string, name: string): FileFormatDef | undefined {
+    return this.fileFormats.get(`${database}.${schema}.${name}`);
+  }
+
+  dropFileFormat(database: string, schema: string, name: string): boolean {
+    return this.fileFormats.delete(`${database}.${schema}.${name}`);
+  }
+
+  /** Remove every file format in a database, or in one of its schemas. */
+  dropFileFormatsIn(database: string, schema?: string): void {
+    for (const [key, format] of this.fileFormats) {
+      if (format.database === database && (schema === undefined || format.schema === schema)) {
+        this.fileFormats.delete(key);
       }
     }
   }

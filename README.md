@@ -131,9 +131,12 @@ curl -s -X POST 'http://localhost:3030/api/v2/statements' \
 | Key-pair (JWT) login, with optional signature verification | Implemented — see [Key-pair authentication](#key-pair-service-account-authentication) | dbt, service accounts |
 | Connector `execute_async` + `get_results_from_sfqid` | **Not supported** — see Limits | — |
 | SQL REST API v2 (`/api/v2/statements`, async handles, cancel) | Implemented | HTTP integrations, curl, custom services |
-| SQL execution | DuckDB, with a Snowflake dialect layer | — |
+| SQL execution | DuckDB, with a Snowflake dialect layer, including `LATERAL FLATTEN` / `TABLE(FLATTEN(…))` over `json_each` | — |
 | `SHOW` / `DESCRIBE` / `USE` / `ALTER SESSION` | Implemented — incl. `SHOW TERSE OBJECTS/SCHEMAS/TABLES/VIEWS`, `SHOW PRIMARY/UNIQUE/IMPORTED KEYS` (always empty), `[<DB>.]information_schema.{columns,tables,views,schemata,databases}` (incl. Snowflake-only `tables` columns read by `dbt docs generate`) | dbt, BI tools (SQLAlchemy reflection) and driver discovery |
-| Account DDL (databases, schemas, warehouses, roles, stages) | Implemented | — |
+| Account DDL (databases, schemas, warehouses, roles, stages, file formats) | Implemented; file formats are held in memory | — |
+| Sequences (`CREATE`/`DROP SEQUENCE`, `seq.NEXTVAL`, `NEXT VALUE FOR`, `SHOW`/`DESCRIBE SEQUENCE`) | Implemented on DuckDB's own sequences; a value is handed out even if the transaction rolls back, as in Snowflake | — |
+| `DESCRIBE STAGE`, `DESCRIBE FILE FORMAT`, `SHOW FILE FORMATS` | Implemented — Snowflake's five-column property table for a stage or a format | — |
+| `GRANT` / `REVOKE`, `SHOW GRANTS` | Implemented as a record, never as enforcement — see Limits | dbt `grants:` configs |
 | Staged files: `CREATE STAGE`, `PUT`, `GET`, `LIST`, `REMOVE`, `COPY INTO` | Implemented via local-filesystem stages | `dbt seed`, staged loads |
 | ODBC | **Not supported** | Power BI, Excel, Tableau |
 
@@ -271,7 +274,8 @@ dbt-snowflake 1.12.4, password auth); the suite does not cover them:
 | `dbt docs generate`, `dbt run-operation` | pass |
 
 Not supported: dynamic tables, materialized views, Python models, Iceberg
-tables, `GRANT`-based `grants:` configs. `CREATE TABLE … CLONE` works as a full
+tables. A `grants:` config runs now: the `GRANT`s are recorded and never
+enforced (see Limits). `CREATE TABLE … CLONE` works as a full
 copy (see Limits); `dbt clone` has not been run against it, and
 `CREATE DATABASE | SCHEMA … CLONE` is refused. Source freshness needs `loaded_at_field`:
 warehouse-metadata freshness reads `last_altered`, which is always NULL here. The
@@ -492,6 +496,28 @@ Being explicit, because a stub that quietly lies is worse than no stub:
 - Transactions cover table DDL and DML, per session. Account-level DDL is
   outside them, and there is no cross-session isolation to configure: another
   session sees committed rows only, which is what Snowflake does too.
+- `GRANT` and `REVOKE` are recorded, and reported back by `SHOW GRANTS`, and
+  nothing else: no statement is authorised or refused, and a grant on an object
+  that does not exist is accepted. That is what makes a dbt `grants:` block run
+  instead of failing on DuckDB's grammar. A renamed table or view keeps its
+  grants under the old name.
+- `CREATE FILE FORMAT` is recorded and never applied: `SHOW FILE FORMATS` and
+  `DESCRIBE FILE FORMAT` report the `TYPE` and options as written, `COPY INTO`
+  still reads its own option list, and a format lives in memory, so a restart
+  forgets it.
+- Sequences run on DuckDB's own: `CREATE`/`DROP SEQUENCE`, `seq.NEXTVAL`,
+  `NEXT VALUE FOR seq`, `seq.CURRVAL`, `SHOW SEQUENCES` and `DESCRIBE SEQUENCE`.
+  A value is not rolled back with a failed transaction, which is Snowflake's rule
+  too, and `CURRVAL` is per session. `ALTER SEQUENCE … RESTART [WITH n]` and `…
+  SET INCREMENT [BY] n` rewrite the definition, keeping the next value on a `SET`.
+  `ORDER`/`NOORDER` and `COMMENT` are accepted and not stored; any other option,
+  `CACHE` and `RENAME TO` included, is refused rather than ignored.
+- A column named `nextval` or `currval` referred to with a qualifier is read as a
+  sequence reference: `t.nextval` becomes `nextval('…t')`. A bare `nextval`
+  column is untouched.
+- `LATERAL FLATTEN` and `TABLE(FLATTEN(…))` become a `json_each` join.
+  `recursive => TRUE` is refused, because it changes which rows come back, and
+  `SEQ` is the output row number rather than a stored sequence.
 - No ODBC.
 - `ALTER SCHEMA ... RENAME TO` is not supported (it errors).
 - `ALTER SCHEMA ... SWAP WITH` is not supported (it errors).

@@ -316,6 +316,22 @@ export const GROUPS: OperationGroup[] = [
         note: 'No privileges attach to a role.',
       },
       {
+        syntax: 'GRANT | REVOKE privileges, roles',
+        behaviour:
+          'Recorded, then answered by `SHOW GRANTS`. `GRANT SELECT ON TABLE t TO ROLE r`, `GRANT ROLE a TO USER u`, `ALL PRIVILEGES`, `WITH GRANT OPTION` and the matching `REVOKE`s all succeed. A dropped role takes its grants with it.',
+        status: 'supported',
+        since: '4.0.0',
+        note: 'Recorded only: no statement is authorised or refused, and a grant on an object that does not exist is accepted.',
+      },
+      {
+        syntax: 'SHOW GRANTS [ON <object>] [TO ROLE | USER <name>] [OF ROLE <name>]',
+        behaviour:
+          'Answers from the recorded grants, in the column shape Snowflake gives each variant.',
+        status: 'partial',
+        since: '4.0.0',
+        note: 'Reports what was granted, not what is enforced: every role can still do everything. A renamed table keeps its grants under the old name.',
+      },
+      {
         syntax: 'CREATE | DROP STAGE',
         behaviour: 'Creates or removes the stage directory that `PUT` writes into.',
         status: 'supported',
@@ -323,10 +339,19 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'CREATE | DROP FILE FORMAT',
-        behaviour: 'Accepted and recorded.',
+        behaviour:
+          'Creates or removes a named file format, `TYPE` and options and all, so `SHOW FILE FORMATS` and `DESCRIBE FILE FORMAT` answer from it.',
         status: 'partial',
         since: '1.0.0',
-        note: 'Copy options are read from `COPY INTO`, not from the format object.',
+        note: 'The options are stored, not applied: `COPY INTO` still reads its own `FILE_FORMAT = (…)` list. Formats live in memory like roles and warehouses, so a restart forgets them.',
+      },
+      {
+        syntax: 'CREATE | ALTER | DROP SEQUENCE',
+        behaviour:
+          'Creates a sequence with `START [WITH]`, `INCREMENT [BY]` (negative for descending), `OR REPLACE` and `IF NOT EXISTS`; `ALTER SEQUENCE … RESTART [WITH n]` and `… SET INCREMENT [BY] n` rewrite it, keeping the value it would hand out next on a `SET` and returning to its start value on a bare `RESTART`; `DROP SEQUENCE [IF EXISTS]`. `seq.NEXTVAL`, `NEXT VALUE FOR seq` and `seq.CURRVAL` read it, with the name resolved from the session when it is not qualified.',
+        status: 'supported',
+        since: '4.0.0',
+        note: '`ORDER`/`NOORDER` and `COMMENT` are accepted and not stored; any other option (`CACHE`, `RENAME TO`, …) is refused rather than ignored. The start value a bare `RESTART` returns to is remembered while the process runs. A column named `nextval` or `currval`, referred to with a qualifier, is read as a sequence reference.',
       },
       {
         syntax: 'CREATE | DROP USER',
@@ -374,17 +399,18 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'SHOW SEQUENCES',
-        behaviour: 'Returns a single `name` column, empty.',
-        status: 'partial',
-        since: '1.0.0',
-        note: 'Sequences are not implemented, including `seq.NEXTVAL`.',
+        behaviour:
+          'Lists the sequences in scope — `created_on`, `name`, `schema_name`, `database_name`, `next_value`, `interval`, `owner`, `comment`, `ordered` — honouring `IN …` and `LIKE`.',
+        status: 'supported',
+        since: '4.0.0',
+        note: '`next_value` is read from the live counter, so it moves as values are used. `ordered` is always `YES`: DuckDB hands values out in order. `created_on` is when the sequence was created, or when this process first saw it.',
       },
       {
         syntax: 'SHOW FILE FORMATS',
-        behaviour: 'Returns Snowflake’s columns, with no rows.',
-        status: 'partial',
+        behaviour: 'Lists the formats in scope, honouring `IN SCHEMA`, `IN DATABASE`, `IN ACCOUNT` and `LIKE`.',
+        status: 'supported',
         since: '1.0.0',
-        note: 'File formats are not listed; create and copy still work.',
+        note: 'Empty until a format is created: they are held in memory like roles and warehouses, so a restart forgets them.',
       },
       {
         syntax: 'DESCRIBE TABLE | VIEW',
@@ -393,11 +419,27 @@ export const GROUPS: OperationGroup[] = [
         since: '1.0.0',
       },
       {
-        syntax: 'DESCRIBE STAGE | FILE FORMAT | SEQUENCE',
-        behaviour: 'Not implemented.',
-        status: 'unsupported',
-        since: '1.0.0',
-        note: '`DESCRIBE` resolves a table or view, and fails with object-not-found otherwise.',
+        syntax: 'DESCRIBE STAGE',
+        behaviour:
+          'Snowflake’s five property columns — `parent_property`, `property`, `property_type`, `property_value`, `property_default` — carrying `url`, `has_credentials`, `create_on`, `type`, `owner`, `comment` and `directory_enabled`.',
+        status: 'supported',
+        since: '4.0.0',
+        note: '`has_credentials` is always `FALSE` (no stage credentials are stored) and `directory_enabled` always `FALSE` (there are no directory tables).',
+      },
+      {
+        syntax: 'DESCRIBE FILE FORMAT',
+        behaviour:
+          'The same property table: `type`, then every option the format was created with, then `owner` and `create_on`.',
+        status: 'supported',
+        since: '4.0.0',
+        note: 'Options are reported as written and never applied; a format is only known to the session that created it plus this process’s memory.',
+      },
+      {
+        syntax: 'DESCRIBE SEQUENCE',
+        behaviour:
+          'One row — `created_on`, `name`, `next_value`, `interval`, `ordered` — for a sequence that exists, and object-not-found otherwise.',
+        status: 'supported',
+        since: '4.0.0',
       },
       {
         syntax: 'information_schema.columns | tables | views | schemata | databases',
@@ -492,11 +534,20 @@ export const GROUPS: OperationGroup[] = [
         note: 'A rolled-back load leaves nothing behind, and a statement that fails inside the transaction aborts it until ROLLBACK. Account-level DDL (databases, schemas, warehouses, roles, stages) is not rolled back.',
       },
       {
-        syntax: '`;`-separated statements in one request',
-        behaviour: 'Each statement routed and run in turn; the driver protocol answers with the last result, the SQL API with one per statement.',
+        syntax: 'Semicolon (;) separated statements in one request',
+        behaviour:
+          'Each `;`-separated statement is routed and run in turn; the driver protocol answers with the last result, the SQL API with one per statement.',
         status: 'supported',
         since: '3.3.0',
         note: '`MULTI_STATEMENT_COUNT` is enforced when the client sets it. Separators inside strings, quoted names, comments and `$$…$$` do not split.',
+      },
+      {
+        syntax: 'LATERAL FLATTEN(input => …) and FROM TABLE(FLATTEN(…))',
+        behaviour:
+          'Expanded into a `json_each` join exposing `SEQ`, `KEY`, `PATH`, `INDEX`, `VALUE` and `THIS`, with `path =>`, `outer => TRUE` and `mode => ARRAY | OBJECT | BOTH`. `VALUE` is JSON, so `VALUE:key` and `VALUE::number` work on it.',
+        status: 'partial',
+        since: '4.0.0',
+        note: '`recursive => TRUE` is refused: it changes which rows come back. `SEQ` is the output row number, not a stored sequence, and the row `outer => TRUE` keeps has NULL in every column where Snowflake repeats `THIS` and `SEQ`.',
       },
       {
         syntax: 'CREATE TABLE … CLONE …',
@@ -656,8 +707,8 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
     outcome: 'There is no ingestion service; load with `COPY INTO` instead.',
   },
   {
-    feature: 'GRANT and REVOKE, privilege and ownership checks',
-    outcome: 'No RBAC: any role may do anything, and these statements fail.',
+    feature: 'Privilege and ownership enforcement',
+    outcome: '`GRANT`/`REVOKE` are recorded and shown by `SHOW GRANTS`; no statement is authorised or refused, and ownership never changes hands.',
   },
   {
     feature: 'Warehouse sizing, credits and query cost',
@@ -672,8 +723,8 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
     outcome: 'Not polled. Use the SQL API with `async=true` for asynchronous work.',
   },
   {
-    feature: 'LATERAL FLATTEN and table functions',
-    outcome: 'No translation; the statement fails rather than approximating an answer.',
+    feature: 'Table functions other than FLATTEN',
+    outcome: '`LATERAL FLATTEN` and `TABLE(FLATTEN(…))` are translated; `GENERATOR`, `RESULT_SCAN` and user table functions are not.',
   },
   {
     feature: 'Unloading: COPY INTO @stage',
@@ -705,6 +756,34 @@ const STATUS_TEXT: Record<OperationStatus, string> = {
 
 const STATUS_ORDER: OperationStatus[] = ['supported', 'partial', 'unsupported'];
 
+/** Display rank of a status: everything that works first, the gaps after it. */
+const STATUS_RANK = new Map(STATUS_ORDER.map((status, index) => [status, index]));
+
+/**
+ * Sort key for the statement column: punctuation and code fencing dropped, so the
+ * order is the one a reader expects. Comparing the raw text would put
+ * `CREATE | DROP VIEW` after every bracketed variant, because `|`, `[` and `_`
+ * collate unpredictably against letters.
+ */
+const statementKey = (syntax: string): string =>
+  syntax.replace(/[^A-Za-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+
+/**
+ * Rows as displayed: supported, then partial, then unsupported, and alphabetical
+ * by statement within each. The table is authored in logical groups, not in
+ * display order, so the sort happens here rather than in the data.
+ */
+function sortedRows(group: OperationGroup): OperationRow[] {
+  return [...group.rows].sort((left, right) => {
+    const rank = (STATUS_RANK.get(left.status) ?? 0) - (STATUS_RANK.get(right.status) ?? 0);
+    if (rank !== 0) return rank;
+    return statementKey(left.syntax).localeCompare(statementKey(right.syntax), 'en', {
+      numeric: true,
+      sensitivity: 'base',
+    });
+  });
+}
+
 const countByStatus = (status: OperationStatus): number =>
   GROUPS.reduce((total, group) => total + group.rows.filter((row) => row.status === status).length, 0);
 
@@ -734,7 +813,7 @@ const paneHead = (title: string, count: number): string =>
   `<h2 class="panehead">${escapeHtml(title)} <span class="badge">${count} entries</span></h2>`;
 
 function renderGroup(group: OperationGroup): string {
-  const rows = group.rows.map(renderRow).join('\n');
+  const rows = sortedRows(group).map(renderRow).join('\n');
   return `${paneHead(group.title, group.rows.length)}
 <p class="muted">${escapeHtml(group.summary)}</p>
 <table>
@@ -772,7 +851,12 @@ ${unsupportedRows}
     [
       ...GROUPS.map((group) => ({ id: group.id, label: group.tab, title: group.title, html: renderGroup(group) })),
       { id: 'not-supported', label: 'Not supported', html: unsupported },
-    ],
+    ].sort((first, second) => {
+      // Alphabetical by tab, except "Not supported": it is a catch-all rather
+      // than an area, so it stays at the end where it is looked for.
+      const pinned = (tab: { id: string }) => (tab.id === 'not-supported' ? 1 : 0);
+      return pinned(first) - pinned(second) || first.label.localeCompare(second.label);
+    }),
     { hash: true, variant: 'dense' },
   );
 
@@ -781,7 +865,9 @@ ${unsupportedRows}
   Everything this server answers: the driver protocol, the SQL REST API, the control
   plane, and the SQL it can run. A row marked partial works but has a gap, and every
   one of those rows says what the gap is — those are the calls that can quietly
-  pass a test for the wrong reason. <strong>Since</strong> names the snowtest
+  pass a test for the wrong reason. Rows run supported first, then partial, then
+  not supported, and alphabetically by statement within each group.
+  <strong>Since</strong> names the snowtest
   release that gave a row the status it shows today, read from that release's own
   table, so a promoted row carries the version of the promotion.
 </p>

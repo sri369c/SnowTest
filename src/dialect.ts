@@ -988,6 +988,192 @@ function precisionUnit(fn: string, args: string[]): string | null {
   throw unsupported(`${fn} with precision ${precision}`);
 }
 
+/** Snowflake's display form of a variant path: `vehicle[0].make` → `['vehicle'][0]['make']`. */
+function bracketPath(path: string): string {
+  let out = '';
+  const segment = /([^.\[\]]+)|\[(\d+)\]/g;
+  for (let match = segment.exec(path); match; match = segment.exec(path)) {
+    out +=
+      match[2] === undefined ? `['${(match[1] ?? '').replace(/'/g, "''")}']` : `[${match[2]}]`;
+  }
+  return out;
+}
+
+/** Keywords that end a table alias, so `… ) WHERE` is not read as `WHERE` being the alias. */
+const FLATTEN_ALIAS_STOP = new Set([
+  'AS', 'ON', 'WHERE', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'CROSS', 'NATURAL', 'GROUP',
+  'ORDER', 'HAVING', 'LIMIT', 'QUALIFY', 'WINDOW', 'UNION', 'EXCEPT', 'INTERSECT', 'USING',
+  'SAMPLE', 'TABLESAMPLE',
+]);
+
+const FLATTEN_ARGUMENTS = new Set(['INPUT', 'PATH', 'OUTER', 'MODE', 'RECURSIVE']);
+
+/**
+ * `LATERAL FLATTEN(…)` and `FROM TABLE(FLATTEN(…))` → a `json_each` join that
+ * exposes Snowflake's six columns.
+ *
+ * DuckDB's `json_each` walks the same documents and reports the key, the value
+ * and the path of every element, so this is a projection rather than an emulation:
+ * `SEQ` is the output row number, `KEY` and `INDEX` split object members from
+ * array elements, `PATH` is rebuilt in Snowflake's `['a'][0]` form, `VALUE` is the
+ * element itself and `THIS` is the input document.
+ *
+ * `recursive => TRUE` is refused rather than ignored: it changes which rows come
+ * back, and a wrong row count is exactly the failure this server exists to make
+ * visible.
+ */
+function flattenCalls(sql: string, parts: string[], literal: (value: string) => string): string {
+  const str = (value: string) => literal(toSqlLiteral(value));
+  const closeBracket = str(']');
+  let out = sql;
+
+  for (let guard = 0; guard < 200; guard += 1) {
+    const call = /(^|[^A-Za-z0-9_$])FLATTEN\s*\(/i.exec(out);
+    if (!call) return out;
+    const head = call.index + call[1].length;
+    const open = head + /FLATTEN\s*\(/i.exec(out.slice(head))![0].length - 1;
+    const close = matchParen(out, open);
+    if (close === -1) return out;
+
+    const named = new Map<string, string>();
+    for (const raw of splitTopLevel(out.slice(open + 1, close))) {
+      if (raw.trim().length === 0) continue;
+      const argument = /^([A-Za-z_][\w$]*)\s*=>\s*([\s\S]+)$/.exec(raw.trim());
+      if (!argument) {
+        throw compilationError('FLATTEN takes named arguments, as in FLATTEN(input => payload:items).');
+      }
+      const name = argument[1].toUpperCase();
+      if (!FLATTEN_ARGUMENTS.has(name)) throw compilationError(`Invalid FLATTEN argument '${argument[1]}'.`);
+      named.set(name, argument[2].trim());
+    }
+
+    const input = named.get('INPUT');
+    if (input === undefined) throw compilationError('FLATTEN requires an input argument.');
+
+    const recursive = named.get('RECURSIVE');
+    if (recursive !== undefined && !/^FALSE$/i.test(resolve(recursive, parts).trim())) {
+      throw unsupported('FLATTEN with recursive => TRUE');
+    }
+
+    const mode = named.get('MODE');
+    // FLATTEN expands arrays and objects; a scalar input contributes no rows,
+    // which is also what makes `outer => TRUE` worth having.
+    let filter = ` WHERE json_type(${input}) IN (${str('ARRAY')}, ${str('OBJECT')})`;
+    if (mode !== undefined) {
+      const value = stripQuotes(resolve(mode, parts)).toUpperCase();
+      if (value !== 'ARRAY' && value !== 'OBJECT' && value !== 'BOTH') {
+        throw compilationError(`FLATTEN mode must be ARRAY, OBJECT or BOTH, not '${value}'.`);
+      }
+      // A mode expands one kind of value only; the other contributes no rows.
+      const kinds = value === 'BOTH' ? ['ARRAY', 'OBJECT'] : [value];
+      filter =
+        kinds.length === 1
+          ? ` WHERE json_type(${input}) = ${str(kinds[0])}`
+          : ` WHERE json_type(${input}) IN (${kinds.map(str).join(', ')})`;
+    }
+
+    const prefix = named.has('PATH')
+      ? str(bracketPath(stripQuotes(resolve(named.get('PATH') as string, parts))))
+      : str('');
+    // json_each reports `fullkey`: `$.name` for an object member, `$[0]` for an array element.
+    const arrayElement = `ends_with(j."fullkey", ${closeBracket})`;
+    const quote = str("'");
+    const path =
+      `CASE WHEN ${arrayElement} THEN ${prefix} || substring(j."fullkey", 2)` +
+      ` ELSE ${prefix} || ${str('[')} || ${quote} || replace(j."key", ${quote}, ${str("''")}) || ${quote} || ${str(']')} END`;
+
+    const subquery =
+      '(SELECT row_number() OVER () AS "SEQ",' +
+      ` CASE WHEN ${arrayElement} THEN NULL ELSE j."key" END AS "KEY",` +
+      ` ${path} AS "PATH",` +
+      ` CASE WHEN ${arrayElement} THEN CAST(j."key" AS INTEGER) ELSE NULL END AS "INDEX",` +
+      ` j."value" AS "VALUE", ${input} AS "THIS"` +
+      ` FROM json_each(${input}) AS j${filter})`;
+
+    const before = out.slice(0, head);
+    const tableWrapper = /\bTABLE\s*\(\s*$/i.exec(before);
+    const lateral = /\bLATERAL\s*$/i.exec(before);
+
+    let start = head;
+    let end = close + 1;
+    let lead = '';
+
+    if (tableWrapper) {
+      start = tableWrapper.index;
+      const closing = /^\s*\)/.exec(out.slice(end));
+      if (closing) end += closing[0].length;
+    } else if (lateral) {
+      start = lateral.index;
+      // `outer => TRUE` keeps a row for input that flattens to nothing.
+      const outer =
+        named.has('OUTER') && /^TRUE$/i.test(resolve(named.get('OUTER') as string, parts).trim());
+      if (outer && /,\s*$/.test(out.slice(0, start))) {
+        start = out.slice(0, start).search(/,\s*$/);
+        lead = ' LEFT JOIN LATERAL ';
+      } else {
+        lead = 'LATERAL ';
+      }
+    }
+
+    let text = out.slice(0, start) + lead + subquery + out.slice(end);
+    let at = start + lead.length + subquery.length;
+    // A quoted alias reaches this point as a masked identifier (\u0002N\u0002), so
+    // both forms count as a name and are never read as a keyword.
+    const alias = /^(\s+(?:AS\s+)?)(\u0002\d+\u0002|"[^"]*"|[A-Za-z_][\w$]*)/i.exec(text.slice(at));
+    const quotedAlias = alias !== null && (alias[2].startsWith('\u0002') || alias[2].startsWith('"'));
+    const aliased = alias !== null && (quotedAlias || !FLATTEN_ALIAS_STOP.has(alias[2].toUpperCase()));
+    if (alias !== null && aliased) at += alias[0].length;
+    if (lead.trim() === 'LEFT JOIN LATERAL') {
+      text = `${text.slice(0, at)} ON TRUE${text.slice(at)}`;
+    } else if (!aliased && (tableWrapper !== null || lateral !== null)) {
+      const generated = ` AS flatten_${guard}`;
+      text = `${text.slice(0, at)}${generated}${text.slice(at)}`;
+    }
+    out = text;
+  }
+
+  return out;
+}
+
+/**
+ * `SEQ.NEXTVAL`, `SEQ.CURRVAL` and `NEXT VALUE FOR SEQ` → DuckDB's
+ * `nextval('DB.SCHEMA.SEQ')`, with the name resolved the way Snowflake resolves
+ * it: one part is the current schema, two add the current database.
+ */
+function sequenceValues(
+  sql: string,
+  parts: string[],
+  literal: (value: string) => string,
+  ctx: RewriteContext,
+): string {
+  const identifier = '(?:\\u0002\\d+\\u0002|[A-Za-z_][\\w$]*)';
+  const qualified = `${identifier}(?:\\s*\\.\\s*${identifier}){0,2}`;
+
+  const resolvedName = (reference: string): string => {
+    const pieces = reference.split('.').map((piece) => {
+      const trimmed = piece.trim();
+      const masked = /^\u0002(\d+)\u0002$/.exec(trimmed);
+      if (masked) return parts[Number(masked[1])].replace(/^"|"$/g, '').replace(/""/g, '"');
+      return trimmed.toUpperCase();
+    });
+    if (pieces.length === 1) return [ctx.database ?? '', ctx.schema ?? '', ...pieces].join('.');
+    if (pieces.length === 2) return [ctx.database ?? '', ...pieces].join('.');
+    return pieces.join('.');
+  };
+
+  const call = (kind: string, reference: string): string =>
+    `${kind.toLowerCase()}(${literal(toSqlLiteral(resolvedName(reference)))})`;
+
+  const values = sql.replace(
+    new RegExp(`(?<![\\w$.])(${qualified})\\s*\\.\\s*(NEXTVAL|CURRVAL)\\b`, 'gi'),
+    (_match, reference: string, kind: string) => call(kind, reference),
+  );
+  return values.replace(
+    new RegExp(`\\bNEXT\\s+VALUE\\s+FOR\\s+(${qualified})\\b`, 'gi'),
+    (_match, reference: string) => call('NEXTVAL', reference),
+  );
+}
+
 const isStringLiteral = (value: string): boolean => constantText(value) !== null;
 
 /**
@@ -1007,6 +1193,12 @@ export function rewrite(
   // Reads quoted names itself, so it runs before they are masked.
   text = databaseInformationSchema(text, ctx, literal);
   text = maskIdentifiers(text, parts);
+  text = sequenceValues(text, parts, literal, ctx);
+
+  // `LATERAL FLATTEN(…)` becomes a correlated `json_each` join. It runs before
+  // the variant-path pass, so the input expression is still translated, and so
+  // are the columns the subquery exposes.
+  text = flattenCalls(text, parts, literal);
 
   if (bindings.length > 0) {
     let index = 0;
