@@ -174,6 +174,8 @@ describe('landing page', () => {
       warehouses: ['SNOWTEST_WH'],
       roles: ['SYSADMIN'],
       stages: 0,
+      queries: [],
+      queryCount: 0,
       sessions: [],
     });
     expect(html).toContain('href="/browse/SNOWTEST/EXAMPLES"');
@@ -190,6 +192,8 @@ describe('landing page', () => {
         warehouses: [],
         roles: [],
         stages: 0,
+        queries: [],
+        queryCount: 0,
         sessions: [
           { user: 'DBT_SVC', database: 'SNOWTEST', schema: 'DBT_TEST', role: 'SYSADMIN', createdAt },
         ],

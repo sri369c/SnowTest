@@ -100,12 +100,40 @@ const STYLES = `
   .refresh { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .85rem;
              cursor: pointer; color: #0969da; background: none; border: 1px solid #d0d7de;
              border-radius: 6px; padding: .2rem .6rem; }
+  .rowbar { display: flex; align-items: center; justify-content: space-between; gap: .6rem; }
+  .rowbar h3 { margin: 0; }
+  .refresh.danger { color: #b42318; }
+  .refresh.danger:hover { border-color: #b42318; background: #fff5f5; }
+  .refresh:disabled { cursor: not-allowed; opacity: .5; }
+  .ok { border: 1px solid #1a7f37; background: #f0fff4; color: #1a7f37; border-radius: 6px;
+        padding: .5rem .75rem; margin: 0 0 .9rem; }
+  .action { display: flex; align-items: flex-start; justify-content: space-between; gap: 1.5rem;
+            border-top: 1px solid #d0d7de; padding: 1rem 0; }
+  .action h3 { margin: 0 0 .3rem; }
+  .action p { margin: 0; }
+  .action-controls { display: flex; align-items: center; gap: .4rem; flex: 0 0 auto; }
+  .modal { width: min(30rem, calc(100vw - 2rem)); padding: 1.1rem 1.25rem;
+           border: 1px solid #d0d7de; border-radius: 10px; background: #ffffff; color: inherit;
+           box-shadow: 0 12px 32px rgba(31, 35, 40, .18); }
+  .modal::backdrop { background: rgba(31, 35, 40, .35); }
+  .modal h3 { margin: 0 0 .5rem; }
+  .modal p { margin: 0 0 .9rem; }
+  .modal label { display: block; margin-bottom: .35rem; }
+  .modal input { font: inherit; font-size: .9rem; padding: .3rem .55rem; width: 100%; box-sizing: border-box;
+                 border: 1px solid #d0d7de; border-radius: 6px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
+  td.sql { max-width: 34rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .refresh:hover { background: #f6f8fa; border-color: #0969da; }
   .refresh svg { width: 14px; height: 14px; }
   .refresh.busy svg { animation: spin .8s linear infinite; }
   .refresh.err { color: #b42318; border-color: #b42318; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-color-scheme: dark) {
+    .ok { background: #12261e; border-color: #2ea043; color: #3fb950; }
+    .modal { background: #161b22; border-color: #30363d; }
+    .modal input { background: #0d1117; color: inherit; border-color: #30363d; }
+    .action { border-color: #30363d; }
     .tabs, .topnav { border-color: #30363d; }
     .tab:hover, .refresh:hover { background: #161b22; }
     .tab[aria-selected="true"], .tab[aria-current] { border-color: #6cb6ff; color: #6cb6ff; }

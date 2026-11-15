@@ -36,12 +36,27 @@ export interface HomeSessionState {
   createdAt: Date;
 }
 
+/** A statement the server timed, as the landing page lists it. */
+export interface HomeQueryState {
+  queryText: string;
+  startedAt: Date;
+  elapsedMs: number;
+  rowsProduced: number;
+  status: string;
+  user: string;
+}
+
 export interface HomeState {
   databases: HomeDatabaseState[];
   warehouses: string[];
   roles: string[];
   stages: number;
   sessions: HomeSessionState[];
+  queries: HomeQueryState[];
+  /** Statements in the timings table, not just the ones the page lists. */
+  queryCount: number;
+  /** What a clear just did, carried across the reload that follows it. */
+  notice?: { kind: 'timings' | 'reset'; text: string } | null;
 }
 
 /** Home's tabs; the catalog browser repeats them as links, with Live state current. */
@@ -51,6 +66,7 @@ export const HOME_TABS = [
   { id: 'connect', label: 'Connect' },
   { id: 'speaks', label: 'What it speaks' },
   { id: 'control', label: 'Control plane' },
+  { id: 'clear', label: 'Clear Data' },
 ] as const;
 
 const REFRESH_ICON =
@@ -63,24 +79,100 @@ const LIVE_SCRIPT = `<script>
   const at = document.getElementById('live-at');
   const stamp = () => { at.textContent = 'updated ' + new Date().toLocaleTimeString(); };
   stamp();
+  const reload = async () => {
+    const response = await fetch('/', { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+    const fresh = doc.getElementById('live-body');
+    if (!fresh) throw new Error('live section missing from response');
+    document.getElementById('live-body').replaceWith(fresh);
+    stamp();
+  };
   button.addEventListener('click', async () => {
     button.classList.add('busy');
     button.classList.remove('err');
     button.disabled = true;
     try {
-      const response = await fetch('/', { cache: 'no-store' });
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-      const fresh = doc.getElementById('live-body');
-      if (!fresh) throw new Error('live section missing from response');
-      document.getElementById('live-body').replaceWith(fresh);
-      stamp();
+      await reload();
     } catch (error) {
       button.classList.add('err');
       at.textContent = 'refresh failed: ' + error.message;
     } finally {
       button.classList.remove('busy');
       button.disabled = false;
+    }
+  });
+})();
+</script>`;
+
+// The Clear Data tab is static, so its listeners can hold their elements.
+const CLEAR_SCRIPT = `<script>
+(() => {
+  const WORD = 'Delete All Data';
+  const timingsDialog = document.getElementById('clear-timings-dialog');
+  const allDialog = document.getElementById('clear-all-dialog');
+  const word = document.getElementById('clear-word');
+  const go = document.getElementById('clear-go');
+  const error = document.getElementById('clear-error');
+  const fail = (what) => (problem) => {
+    error.hidden = false;
+    error.textContent = what + ' failed: ' + problem.message;
+  };
+  const close = (dialog) => dialog.close();
+
+  document.getElementById('clear-timings-open').addEventListener('click', () => {
+    error.hidden = true;
+    timingsDialog.showModal();
+  });
+  document.getElementById('clear-all-open').addEventListener('click', () => {
+    error.hidden = true;
+    word.value = '';
+    go.disabled = true;
+    allDialog.showModal();
+    word.focus();
+  });
+  for (const button of document.querySelectorAll('.modal [data-close]')) {
+    button.addEventListener('click', () => close(button.closest('dialog')));
+  }
+  // A confirmation is for the click that caused it, not for every refresh after.
+  // The flag lives in the URL so it survives the redirect, and is dropped as soon
+  // as the page renders: the banner stays on screen, a reload no longer shows it.
+  if (new URLSearchParams(location.search).has('cleared')) {
+    history.replaceState(null, '', location.pathname + location.hash);
+  }
+
+  // A method=dialog form closes on submit, and Enter in the text field is an
+  // implicit submit: without this, Enter dismissed the dialog and did nothing.
+  // Neither dialog does anything on Enter; both act only on their own button.
+  for (const form of document.querySelectorAll('.modal form')) {
+    form.addEventListener('submit', (event) => event.preventDefault());
+  }
+
+  document.getElementById('clear-timings-yes').addEventListener('click', async (event) => {
+    event.target.disabled = true;
+    try {
+      const response = await fetch('/_snowtest/queries/clear', { method: 'POST' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      location.replace('/?cleared=timings#clear');
+    } catch (problem) {
+      event.target.disabled = false;
+      timingsDialog.close();
+      fail('Clear')(problem);
+    }
+  });
+  word.addEventListener('input', () => {
+    go.disabled = word.value !== WORD;
+  });
+  go.addEventListener('click', async () => {
+    go.disabled = true;
+    try {
+      const response = await fetch('/_snowtest/reset', { method: 'POST' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      location.replace('/?cleared=reset#clear');
+    } catch (problem) {
+      go.disabled = false;
+      allDialog.close();
+      fail('Reset')(problem);
     }
   });
 })();
@@ -110,6 +202,18 @@ export function formatDuration(ms: number): string {
   if (hours > 0) return `${hours}h ${pad(minutes)}m ${pad(seconds)}s`;
   if (minutes > 0) return `${minutes}m ${pad(seconds)}s`;
   return `${seconds}s`;
+}
+
+/** A single statement is usually under a second, so this counts in milliseconds. */
+export function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)}s`;
+}
+
+/** One-line statement text for a table cell; the full text is the cell's title. */
+function shorten(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 export function renderHome(
@@ -158,6 +262,13 @@ export function renderHome(
           `    <tr><td><code>${escapeHtml(session.user)}</code></td><td><code>${escapeHtml(session.database ?? 'NULL')}.${escapeHtml(session.schema ?? 'NULL')}</code></td><td>${escapeHtml(session.role)}</td><td>${escapeHtml(formatServerTime(session.createdAt))}</td><td>${formatDuration(now - session.createdAt.getTime())}</td></tr>`,
       )
       .join('\n') || '    <tr><td colspan="5">No active sessions.</td></tr>';
+  const queryRows =
+    state.queries
+      .map(
+        (query) =>
+          `    <tr><td>${escapeHtml(formatServerTime(query.startedAt))}</td><td><code>${escapeHtml(query.user)}</code></td><td class="sql" title="${escapeHtml(query.queryText)}">${escapeHtml(shorten(query.queryText, 90))}</td><td class="num">${escapeHtml(formatElapsed(query.elapsedMs))}</td><td class="num">${query.rowsProduced}</td><td>${escapeHtml(query.status)}</td></tr>`,
+      )
+      .join('\n') || '    <tr><td colspan="6">No statements recorded yet.</td></tr>';
   const surfaceRows = LANDING_SURFACES.map(
     (surface) =>
       `  <tr><th scope="row"><a href="/operations#${escapeHtml(surface.id)}">${escapeHtml(surface.label)}</a></th><td>${escapeHtml(surface.summary)} <span class="muted">(${surface.supported} of ${surface.total} supported)</span></td></tr>`,
@@ -204,6 +315,17 @@ ${databaseRows}
   <tr><th>User</th><th>Context</th><th>Role</th><th>Started (server time)</th><th>Length</th></tr>
 ${sessionRows}
 </table>
+
+<h3>Query timings</h3>
+<table>
+  <tr><th>Started (server time)</th><th>User</th><th>Statement</th><th>Took</th><th>Rows</th><th>Status</th></tr>
+${queryRows}
+</table>
+<p class="muted">
+  Every statement is timed and kept in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, so you can
+  query it from a client. Nothing here is removed on its own — empty it from the
+  <a href="#clear">Clear Data</a> tab.
+</p>
 </div>`;
 
   const python = `<pre><code>import snowflake.connector
@@ -257,11 +379,81 @@ ${surfaceRows}
   <span class="muted">every endpoint, statement and function, with what each one does and where it stops.</span>
 </p>`;
 
+  // Each confirmation belongs to the block that caused it, under its heading.
+  const noticeFor = (kind: 'timings' | 'reset'): string =>
+    state.notice && state.notice.kind === kind
+      ? `\n    <p class="ok" role="status">${escapeHtml(state.notice.text)}</p>`
+      : '';
+  const clearPane = `<p class="lede">
+  Two things can be cleared, and neither happens on its own.
+</p>
+
+<div class="action">
+  <div>
+    <h3>Query timings</h3>${noticeFor('timings')}
+    <p class="muted">
+      ${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>.
+    </p>
+  </div>
+  <div class="action-controls">
+    <button type="button" class="refresh" id="clear-timings-open" aria-haspopup="dialog">Clear timings</button>
+  </div>
+</div>
+
+<div class="action">
+  <div>
+    <h3>Everything</h3>${noticeFor('reset')}
+    <p class="muted">
+      Drops every database and its files, every stage, session and statement handle,
+      and the timings table, then rebuilds the configured catalog. There is no undo.
+    </p>
+  </div>
+  <div class="action-controls">
+    <button type="button" class="refresh danger" id="clear-all-open" aria-haspopup="dialog">Delete all data</button>
+  </div>
+</div>
+
+<p class="muted">
+  A direct <code>POST /_snowtest/reset</code> still resets without the confirmation, as it always has.
+</p>
+<p class="warn" id="clear-error" hidden></p>
+
+<dialog class="modal" id="clear-timings-dialog" aria-labelledby="clear-timings-title">
+  <form method="dialog">
+    <h3 id="clear-timings-title">Clear the query timings?</h3>
+    <p class="muted">
+      Empties <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code> — ${state.queryCount} statement(s).
+      Databases, stages and sessions stay exactly as they are.
+    </p>
+    <div class="modal-actions">
+      <button type="button" class="refresh" data-close>Cancel</button>
+      <button type="button" class="refresh danger" id="clear-timings-yes">Clear timings</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="clear-all-dialog" aria-labelledby="clear-all-title">
+  <form method="dialog">
+    <h3 id="clear-all-title">Delete all data?</h3>
+    <p class="muted">
+      Every database and its files, every stage, session and statement handle, and the
+      timings table. The configured catalog is rebuilt. There is no undo.
+    </p>
+    <label for="clear-word">Type <code>Delete All Data</code> to confirm</label>
+    <input type="text" id="clear-word" autocomplete="off" spellcheck="false" autocapitalize="off">
+    <div class="modal-actions">
+      <button type="button" class="refresh" data-close>Cancel</button>
+      <button type="button" class="refresh danger" id="clear-go" disabled>Delete all data</button>
+    </div>
+  </form>
+</dialog>`;
+
   const control = `<table>
   <tr><th><code>GET /_snowtest/health</code></th><td>liveness probe</td></tr>
   <tr><th><code>GET /_snowtest/state</code></th><td>databases, schemas, warehouses, roles, stages, sessions</td></tr>
   <tr><th><code>POST /_snowtest/seed</code></th><td>run a SQL script: <code>{"sql": "..."}</code></td></tr>
   <tr><th><code>POST /_snowtest/reset</code></th><td>drop everything, persisted files included, and recreate the configured catalog</td></tr>
+  <tr><th><code>POST /_snowtest/queries/clear</code></th><td>empty the query timings table</td></tr>
 </table>`;
 
   const connect = renderTabs(
@@ -283,11 +475,12 @@ ${surfaceRows}
 ${renderTabs(
   HOME_TABS.map((tab) => ({
     ...tab,
-    html: { overview, live, connect, speaks, control }[tab.id],
+    html: { overview, live, connect, speaks, control, clear: clearPane }[tab.id],
   })),
   { hash: true },
 )}
-${LIVE_SCRIPT}`;
+${LIVE_SCRIPT}
+${CLEAR_SCRIPT}`;
 
   return renderPage({ title: 'snowtest — Snowflake-compatible stub server', body, version, nav: 'home' });
 }

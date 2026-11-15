@@ -26,11 +26,12 @@ No Node install required — run it as a container. Podman and Docker both work;
 `setup.py` handles the build, the port, and the shared stage directory for you:
 
 ```bash
-./setup.py up        # build, start, wait until healthy, seed example tables, print the dbt profile
-./setup.py redeploy  # after a code change: down, clear stages, rebuild, up (+ seed; --no-seed-examples skips)
+./setup.py up        # start it (creating the container only if it is missing), wait until healthy
+./setup.py redeploy  # after a code change: replace the container, clear stages, rebuild, seed
+                     # --no-rebuild / --no-recreate / --no-seed-examples leave a part out
 ./setup.py status    # engine, store, machine, Desktop pipe, container state, health
 ./setup.py reset     # drop all data (persisted files too) and recreate the catalog
-./setup.py down        # stop and remove; never deletes data (volume and stages stay)
+./setup.py down        # stop it; nothing is removed (container, volume and stages stay)
 ```
 
 Data survives restarts: `setup.py` mounts a named volume `<name>-data` and
@@ -205,7 +206,7 @@ which keeps SQL-only tests simple. Register the **public** key and the login
 path starts checking like the real thing:
 
 ```bash
-./setup.py up --recreate --public-key rsa_key.pub --users DBT_SVC
+./setup.py redeploy --public-key rsa_key.pub --users DBT_SVC
 ```
 
 (`--public-key` sets `SNOWTEST_JWT_PUBLIC_KEY`; `--users` sets the
@@ -226,7 +227,7 @@ test:dbt`); see [dbt compatibility](#dbt-compatibility) for what has been
 verified.
 
 ```yaml
-# profiles.yml — what `./setup.py up --public-key … --write-profile DIR` writes
+# profiles.yml — what `./setup.py redeploy --public-key … --write-profile DIR` writes
 snowtest:
   target: dev
   outputs:
@@ -470,6 +471,24 @@ that appear in practice:
 Anything untranslatable is passed through unchanged and fails with an honest
 Snowflake-shaped error; syntax recognised but not emulated fails with
 `... is not supported on snowtest`. Neither returns silently wrong data.
+
+### Query history
+
+Every statement is timed and noted in `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`, so
+timings are a table you can query rather than a log line you have to scrape:
+
+```sql
+select query_text, total_elapsed_time, rows_produced, execution_status
+from snowflake.account_usage.query_history
+order by query_id desc limit 20;
+```
+
+`total_elapsed_time` is milliseconds of wall clock around the statement, closed
+before the row is written, so a query never pays for its own bookkeeping. Failed
+statements are in there too, with `execution_status = 'FAIL'` and the code and
+message the client was given. Nothing is pruned: rows stay until you empty the
+table from the **Clear Data** tab (or `POST /_snowtest/queries/clear`), and a
+reset empties it along with everything else.
 
 ## Limits
 

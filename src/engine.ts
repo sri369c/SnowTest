@@ -70,11 +70,58 @@ function typeName(type: unknown): string {
   return String(type);
 }
 
+/** `TIMESTAMP` literal text: the column is a plain timestamp, so no zone suffix rides along. */
+function utcStamp(at: Date): string {
+  return at.toISOString().replace('T', ' ').slice(0, 23);
+}
+
 /**
  * Empty, read-only catalog a session without a current database or schema points at:
  * unqualified names find nothing and cannot be created. Read-only needs a file (DuckDB refuses `:memory:`).
  */
 const NO_CONTEXT_CATALOG = '__snowtest_no_context';
+
+/**
+ * The account's own query history, at the name Snowflake keeps it, in a plain
+ * table. Nothing ages rows out on its own: the Clear button on the landing page
+ * is the only thing that empties this, so a test can look back as far as it likes.
+ */
+const HISTORY_DATABASE = 'SNOWFLAKE';
+const HISTORY_SCHEMA = 'ACCOUNT_USAGE';
+const HISTORY_TABLE = 'QUERY_HISTORY';
+const HISTORY_SEQUENCE = 'QUERY_HISTORY_SEQ';
+/** Not `.duckdb`: DataDir restores every `.duckdb` file as a user database, and this is not one. */
+const HISTORY_FILE = 'query_history.db';
+
+/** One statement as the landing page shows it. */
+export interface QueryHistoryEntry {
+  queryText: string;
+  startedAt: Date;
+  elapsedMs: number;
+  rowsProduced: number;
+  status: string;
+  user: string;
+}
+
+/** One statement, as the history table records it. Times are wall clock, UTC. */
+export interface QueryHistoryRecord {
+  queryText: string;
+  databaseName: string | null;
+  schemaName: string | null;
+  queryType: string;
+  sessionId: number;
+  userName: string;
+  roleName: string;
+  warehouseName: string | null;
+  warehouseSize: string | null;
+  executionStatus: 'SUCCESS' | 'FAIL';
+  errorCode: string | null;
+  errorMessage: string | null;
+  startedAt: Date;
+  endedAt: Date;
+  totalElapsedTime: number;
+  rowsProduced: number;
+}
 
 export interface TableInfo {
   name: string;
@@ -115,7 +162,105 @@ export class Engine {
     await admin.run(`ATTACH ${file} AS ${quoteIdent(NO_CONTEXT_CATALOG)}`);
     await admin.run(`DETACH ${quoteIdent(NO_CONTEXT_CATALOG)}`);
     await admin.run(`ATTACH ${file} AS ${quoteIdent(NO_CONTEXT_CATALOG)} (READ_ONLY)`);
-    return new Engine(instance, admin, dataDir, noContextDir);
+    const engine = new Engine(instance, admin, dataDir, noContextDir);
+    await engine.ensureQueryHistory();
+    return engine;
+  }
+
+  /** Create the table and the counter behind `query_id`. Idempotent. */
+  private async ensureQueryHistory(): Promise<void> {
+    const target = this.dataDir
+      ? toSqlLiteral(join(this.dataDir.root, HISTORY_FILE))
+      : "':memory:'";
+    await this.admin.run(`ATTACH ${target} AS ${HISTORY_DATABASE}`);
+    await this.admin.run(`CREATE SCHEMA IF NOT EXISTS ${HISTORY_DATABASE}.${HISTORY_SCHEMA}`);
+    await this.admin.run(
+      `CREATE SEQUENCE IF NOT EXISTS ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_SEQUENCE} START 1`,
+    );
+    await this.admin.run(
+      `CREATE TABLE IF NOT EXISTS ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE} (
+         query_id BIGINT NOT NULL,
+         query_text VARCHAR NOT NULL,
+         database_name VARCHAR,
+         schema_name VARCHAR,
+         query_type VARCHAR,
+         session_id BIGINT,
+         user_name VARCHAR,
+         role_name VARCHAR,
+         warehouse_name VARCHAR,
+         warehouse_size VARCHAR,
+         execution_status VARCHAR,
+         error_code VARCHAR,
+         error_message VARCHAR,
+         start_time TIMESTAMP,
+         end_time TIMESTAMP,
+         total_elapsed_time BIGINT,
+         rows_produced BIGINT
+       )`,
+    );
+  }
+
+  /**
+   * Note one statement. One INSERT, with the counter read inside it so nothing has
+   * to be counted, swept or pruned on the way.
+   */
+  async recordQuery(record: QueryHistoryRecord): Promise<void> {
+    const value = (input: string | number | null): string => {
+      if (input === null) return 'NULL';
+      if (typeof input === 'number') return String(Math.max(0, Math.trunc(input)));
+      return toSqlLiteral(input);
+    };
+    const target = `${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}`;
+    await this.admin.run(
+      `WITH n AS (SELECT nextval('${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_SEQUENCE}') AS v)
+       INSERT INTO ${target}
+         (query_id, query_text, database_name, schema_name, query_type, session_id,
+          user_name, role_name, warehouse_name, warehouse_size, execution_status,
+          error_code, error_message, start_time, end_time, total_elapsed_time, rows_produced)
+       SELECT v,
+              ${value(record.queryText)}, ${value(record.databaseName)}, ${value(record.schemaName)},
+              ${value(record.queryType)}, ${value(record.sessionId)}, ${value(record.userName)},
+              ${value(record.roleName)}, ${value(record.warehouseName)}, ${value(record.warehouseSize)},
+              ${value(record.executionStatus)}, ${value(record.errorCode)}, ${value(record.errorMessage)},
+              TIMESTAMP '${utcStamp(record.startedAt)}', TIMESTAMP '${utcStamp(record.endedAt)}',
+              ${value(record.totalElapsedTime)}, ${value(record.rowsProduced)}
+       FROM n`,
+    );
+  }
+
+  /** How many statements the table holds, for the Clear Data tab. */
+  async queryHistoryCount(): Promise<number> {
+    const rows = await this.queryOnAdmin(
+      `SELECT count(*) FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}`,
+    );
+    return Number(rows[0]?.[0] ?? 0);
+  }
+
+  /** Newest statements first, for the landing page. */
+  async queryHistory(limit = 15): Promise<QueryHistoryEntry[]> {
+    const rows = await this.queryOnAdmin(
+      `SELECT query_text, start_time, total_elapsed_time, rows_produced, execution_status, user_name
+       FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}
+       ORDER BY query_id DESC LIMIT ${Math.max(1, Math.trunc(limit))}`,
+    );
+    return rows.map((row) => ({
+      queryText: String(row[0]),
+      startedAt: row[1] instanceof Date ? row[1] : new Date(String(row[1])),
+      elapsedMs: Number(row[2] ?? 0),
+      rowsProduced: Number(row[3] ?? 0),
+      status: String(row[4] ?? ''),
+      user: String(row[5] ?? ''),
+    }));
+  }
+
+  /** Empty the timings table, and say how many statements went. */
+  async clearQueryHistory(): Promise<number> {
+    const rows = await this.queryOnAdmin(
+      `SELECT count(*) FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}`,
+    );
+    const cleared = Number(rows[0]?.[0] ?? 0);
+    await this.admin.run(`DELETE FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}`);
+    return cleared;
   }
 
   /** Attach a Snowflake database as its own DuckDB catalog. Idempotent. */

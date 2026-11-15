@@ -34,7 +34,7 @@ import {
   renderSchema,
   type BrowseTable,
 } from './browse.js';
-import { renderHome, type HomeDatabaseState } from './home.js';
+import { renderHome, type HomeDatabaseState, type HomeQueryState } from './home.js';
 import { renderOperations } from './operations.js';
 import { renderConfiguration, renderTroubleshooting } from './usage.js';
 import { PACKAGE_VERSION } from './version.js';
@@ -386,12 +386,43 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       databases.push({ name: database.name, schemas });
     }
 
+    // Timings are a convenience: a history table that cannot be read must not
+    // take the landing page down with it.
+    let queries: HomeQueryState[] = [];
+    let queryCount = 0;
+    try {
+      queries = await engine.queryHistory(PREVIEW_LIMIT);
+      queryCount = await engine.queryHistoryCount();
+    } catch {
+      queries = [];
+      queryCount = 0;
+    }
+
+    // The Clear Data tab redirects back here with what just happened, so the
+    // confirmation survives the reload that refreshes the counts.
+    const cleared = c.req.query('cleared');
+    const notice =
+      cleared === 'timings'
+        ? {
+            kind: 'timings' as const,
+            text: 'Query timings cleared; other items like databases, stages and sessions are untouched.',
+          }
+        : cleared === 'reset'
+          ? {
+              kind: 'reset' as const,
+              text: 'All data deleted. Every database and its files, stage, session and recorded statement is gone.',
+            }
+          : null;
+
     return c.html(
       renderHome(config, new URL(c.req.url).origin, SERVER_VERSION, {
         databases,
         warehouses: [...catalog.warehouses.keys()].sort(),
         roles: [...catalog.roles.keys()].sort(),
         stages: catalog.stages.size,
+        queries,
+        queryCount,
+        notice,
         sessions: sessions.all().map((session) => ({
           user: session.user,
           database: session.database,
@@ -540,6 +571,10 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }),
   );
 
+  app.post('/_snowtest/queries/clear', async (c) =>
+    c.json({ cleared: await engine.clearQueryHistory() }),
+  );
+
   app.post('/_snowtest/seed', async (c) => {
     const parsed = await readJson(c);
     if (!parsed.ok) return c.json({ error: 'Request body must be JSON.' }, 400);
@@ -594,6 +629,9 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     statements.clear();
     asyncResults.clear();
     queryLog.clear();
+    // A reset is "everything gone", and the timings table is part of everything:
+    // it outlives database drops, so it has to be emptied here by name.
+    await engine.clearQueryHistory();
 
     for (const database of config.databases) {
       catalog.createDatabase(database.name);
