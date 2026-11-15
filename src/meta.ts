@@ -16,7 +16,7 @@ import { join } from 'node:path';
 
 import { Catalog, normalizeName } from './catalog.js';
 import { rewrite, splitColumnListCtas, toSqlLiteral, type ColumnListCtas } from './dialect.js';
-import { Engine, quoteIdent, type EngineConnection, type QueryResult } from './engine.js';
+import { Engine, quoteIdent, type EngineConnection, type QueryResult, type SequenceInfo } from './engine.js';
 import {
   SnowflakeError,
   compilationError,
@@ -28,7 +28,7 @@ import {
 import type { DataDir } from './persist.js';
 import type { Session } from './session.js';
 import { StageStore } from './stage.js';
-import { toSnowflakeType, toSnowflakeTypeName, type SnowflakeColumn } from './types.js';
+import { formatTimestamp, toSnowflakeType, toSnowflakeTypeName, type SnowflakeColumn } from './types.js';
 
 export interface Outcome {
   columns: SnowflakeColumn[];
@@ -99,6 +99,53 @@ interface ColumnSpec {
 }
 
 /** Build a synthetic result set from `[name, type]` specs and raw rows. */
+/** The value a sequence hands out next; DuckDB records the last one issued. */
+function nextValueOf(sequence: SequenceInfo): number {
+  return sequence.lastValue === null ? sequence.startValue : sequence.lastValue + sequence.increment;
+}
+
+/** The five columns `DESCRIBE STAGE` and `DESCRIBE FILE FORMAT` answer in. */
+const DESCRIBE_PROPERTY_COLUMNS = [
+  { name: 'parent_property', duckType: 'VARCHAR' },
+  { name: 'property', duckType: 'VARCHAR' },
+  { name: 'property_type', duckType: 'VARCHAR' },
+  { name: 'property_value', duckType: 'VARCHAR' },
+  { name: 'property_default', duckType: 'VARCHAR' },
+];
+
+/** Object kinds named without a container, so a grant on one is recorded as written. */
+const ACCOUNT_SCOPED_GRANT_KINDS = new Set([
+  'ACCOUNT',
+  'DATABASE',
+  'WAREHOUSE',
+  'ROLE',
+  'USER',
+  'INTEGRATION',
+]);
+
+/**
+ * The name a grant is recorded (and looked up) under, resolved the way
+ * Snowflake resolves it when the statement runs: `GRANT … ON TABLE t` records
+ * `DB.SCHEMA.T`, which is what lets a later `DROP TABLE t` find it again.
+ */
+function grantedNameFor(session: Session, grantedOn: string, reference: string): string {
+  const pieces = canonicalName(reference).split('.');
+  if (ACCOUNT_SCOPED_GRANT_KINDS.has(grantedOn)) return pieces.join('.');
+  if (grantedOn === 'SCHEMA') {
+    if (pieces.length >= 2) return pieces.join('.');
+    return session.database ? `${session.database}.${pieces[0]}` : pieces[0];
+  }
+  // Table-like objects are `db.schema.name`; a two-part name is missing only the
+  // database, which the drop will resolve, so it must be filled in here too.
+  if (pieces.length >= 3) return pieces.join('.');
+  if (pieces.length === 2) {
+    return session.database ? `${session.database}.${pieces.join('.')}` : pieces.join('.');
+  }
+  if (session.database && session.schema) return `${session.database}.${session.schema}.${pieces[0]}`;
+  if (session.database) return `${session.database}.${pieces[0]}`;
+  return pieces[0];
+}
+
 function syntheticOutcome(
   specs: ColumnSpec[],
   rawRows: unknown[][],
@@ -408,6 +455,14 @@ export interface ExecuteOptions {
   bindings?: unknown[];
 }
 
+/** Canonical form of a possibly-qualified object name, as SQL text supplies it. */
+function canonicalName(raw: string): string {
+  return raw
+    .split('.')
+    .map((part) => normalizeName(part))
+    .join('.');
+}
+
 export class StatementRouter {
   constructor(
     private readonly engine: Engine,
@@ -455,8 +510,12 @@ export class StatementRouter {
     }
 
     if (verb === 'USE') return this.handleUse(statement, session);
+    if (verb === 'GRANT' || verb === 'REVOKE') return this.handleAccess(statement, session);
     if (verb === 'ALTER' && /^alter\s+session\b/i.test(statement)) {
       return this.handleAlterSession(statement, session);
+    }
+    if (verb === 'ALTER' && /^alter\s+sequence\b/i.test(statement)) {
+      return this.handleAlterSequence(statement, session);
     }
     if (verb === 'PUT') return this.handlePut(statement, session);
     if (verb === 'GET') return this.handleGet(statement, session);
@@ -487,6 +546,30 @@ export class StatementRouter {
     if (verb === 'CREATE' || verb === 'DROP' || verb === 'ALTER' || verb === 'COMMENT') {
       const handled = await this.handleAccountDdl(statement, session);
       if (handled) return handled;
+    }
+
+    if (verb === 'CREATE' && /^create\s+(?:or\s+replace\s+)?sequence\b/i.test(statement)) {
+      return this.handleCreateSequence(statement, session);
+    }
+
+    if (/^drop\s+(?:table|view|sequence)\b/i.test(statement)) {
+      const outcome = await this.runOnEngine(statement, session, options);
+      // A dropped table or view takes the grants recorded on it, as in Snowflake.
+      // The drop already succeeded, so a name that will not resolve has nothing
+      // recorded against it.
+      const reference =
+        /^drop\s+(?:table|view|sequence)\s+(?:if\s+exists\s+)?([\w$".]+(?:\s*\.\s*[\w$".]+)*)/i.exec(statement)?.[1];
+      if (reference !== undefined) {
+        try {
+          const name = displayName(resolveTable(session, reference));
+          this.catalog.purgeGrantsFor(name);
+          this.catalog.sequenceStarts.delete(name);
+          this.catalog.sequenceCreatedAt.delete(name);
+        } catch {
+          /* the statement itself would have failed first */
+        }
+      }
+      return outcome;
     }
 
     return this.runOnEngine(statement, session, options);
@@ -837,6 +920,239 @@ export class StatementRouter {
     }
 
     throw compilationError(`Unsupported USE ${scope} ${target}.`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Access control
+  // ---------------------------------------------------------------------------
+
+  /**
+   * `GRANT` / `REVOKE` are recorded, and answered back by `SHOW GRANTS`; nothing
+   * is enforced, because there is no privilege model behind them.
+   *
+   * They used to reach DuckDB and fail on its grammar, which took out a whole
+   * dbt project over a `grants:` block. A grant that has no effect is closer to
+   * Snowflake than a syntax error, as long as the documentation says which of
+   * the two it is — so `/operations` and the README call that out rather than
+   * sampling RBAC.
+   */
+  private handleAccess(statement: string, session: Session): Outcome {
+    const revoke = /^revoke\b/i.test(statement);
+    const grantOption = /\bwith\s+grant\s+option\s*$/i.test(statement);
+    const body = statement
+      .replace(/\bwith\s+grant\s+option\s*$/i, '')
+      .replace(/\b(?:cascade|restrict)\s*$/i, '')
+      .trim();
+
+    const roleGrant =
+      /^(?:grant|revoke)\s+(?:grant\s+option\s+for\s+)?role\s+([\w$".]+)\s+(?:to|from)\s+(role|user)\s+([\w$".]+)$/i.exec(
+        body,
+      );
+    if (roleGrant) {
+      const grantedRole = normalizeName(roleGrant[1]);
+      const granteeType = roleGrant[2].toUpperCase() as 'ROLE' | 'USER';
+      const granteeName = normalizeName(roleGrant[3]);
+      if (revoke) {
+        this.catalog.removeGrants({
+          privilege: 'USAGE',
+          grantedOn: 'ROLE',
+          name: grantedRole,
+          grantedTo: granteeType,
+          granteeName,
+        });
+      } else {
+        if (!this.catalog.roles.has(grantedRole)) throw objectNotFound('ROLE', grantedRole);
+        if (granteeType === 'ROLE' && !this.catalog.roles.has(granteeName)) {
+          throw objectNotFound('ROLE', granteeName);
+        }
+        this.catalog.addGrant({
+          privilege: 'USAGE',
+          grantedOn: 'ROLE',
+          name: grantedRole,
+          grantedTo: granteeType,
+          granteeName,
+          grantOption,
+          grantedBy: session.role,
+          createdAt: new Date(),
+        });
+      }
+      return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.alter);
+    }
+
+    const objectGrant =
+      /^(?:grant|revoke)\s+([\s\S]+?)\s+on\s+(account|(database|schema|table|view|stage|warehouse|role|user|function|procedure|file\s+format|sequence|integration)\s+([\w$".]+(?:\s*\.\s*[\w$".]+)*))\s+(?:to|from)\s+(role|user)\s+([\w$".]+)$/i.exec(
+        body,
+      );
+    if (!objectGrant) {
+      throw compilationError(`Invalid ${revoke ? 'REVOKE' : 'GRANT'} statement: ${statement}`);
+    }
+
+    const privileges = objectGrant[1]
+      .split(',')
+      .map((privilege) => privilege.trim().toUpperCase().replace(/\s+/g, ' '))
+      .filter((privilege) => privilege.length > 0);
+    if (privileges.length === 0) {
+      throw compilationError(`Invalid ${revoke ? 'REVOKE' : 'GRANT'} statement: ${statement}`);
+    }
+
+    const grantedOn = objectGrant[3] ? objectGrant[3].toUpperCase().replace(/\s+/g, ' ') : 'ACCOUNT';
+    const name =
+      objectGrant[4] === undefined ? null : grantedNameFor(session, grantedOn, objectGrant[4]);
+    const granteeType = objectGrant[5].toUpperCase() as 'ROLE' | 'USER';
+    const granteeName = normalizeName(objectGrant[6]);
+
+    if (!revoke && granteeType === 'ROLE' && !this.catalog.roles.has(granteeName)) {
+      throw objectNotFound('ROLE', granteeName);
+    }
+
+    for (const privilege of privileges) {
+      // `ALL` on a revoke clears every privilege on that object for the grantee.
+      const all = privilege === 'ALL' || privilege === 'ALL PRIVILEGES';
+      if (revoke) {
+        this.catalog.removeGrants({
+          privilege: all ? undefined : privilege,
+          grantedOn,
+          name,
+          grantedTo: granteeType,
+          granteeName,
+        });
+      } else {
+        this.catalog.addGrant({
+          privilege: all ? 'ALL' : privilege,
+          grantedOn,
+          name,
+          grantedTo: granteeType,
+          granteeName,
+          grantOption,
+          grantedBy: session.role,
+          createdAt: new Date(),
+        });
+      }
+    }
+
+    return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.alter);
+  }
+
+  /**
+   * When a sequence was created — or, for one this process did not create, when
+   * it first saw it. DuckDB's catalog has no creation time to report.
+   */
+  private sequenceCreatedAt(database: string, schema: string, name: string): Date {
+    const key = `${database}.${schema}.${name}`;
+    const known = this.catalog.sequenceCreatedAt.get(key);
+    if (known !== undefined) return known;
+    const seen = new Date();
+    this.catalog.sequenceCreatedAt.set(key, seen);
+    return seen;
+  }
+
+  /**
+   * `CREATE [OR REPLACE] SEQUENCE`. DuckDB keeps the state; this normalises the
+   * Snowflake spelling to what it understands — `ORDER`/`NOORDER` dropped (its
+   * sequences are always ordered), `COMMENT` dropped, and an explicit range for
+   * a descending sequence — and refuses anything else rather than ignoring it.
+   */
+  private async handleCreateSequence(statement: string, session: Session): Promise<Outcome> {
+    const match =
+      /^create\s+(or\s+replace\s+)?sequence\s+(if\s+not\s+exists\s+)?([\w$".]+(?:\s*\.\s*[\w$".]+){0,2})([\s\S]*)$/i.exec(
+        statement,
+      );
+    if (!match) throw compilationError(`Unsupported CREATE SEQUENCE statement: ${statement}`);
+
+    const resolved = resolveTable(session, match[3]);
+    const key = `${resolved.database}.${resolved.schema}.${resolved.name}`;
+    if (!this.catalog.getSchema(resolved.database, resolved.schema)) {
+      throw objectNotFound('SCHEMA', `${resolved.database}.${resolved.schema}`);
+    }
+
+    const start = /(?:^|\s)start\s*(?:with\s*)?=?\s*(-?\d+)/i.exec(match[4])?.[1];
+    const increment = /(?:^|\s)increment\s*(?:by\s*)?=?\s*(-?\d+)/i.exec(match[4])?.[1];
+    const step = increment === undefined ? 1 : Number(increment);
+    if (step === 0) throw compilationError('Sequence increment cannot be zero.');
+
+    const leftovers = match[4]
+      .replace(/(?:^|\s)start\s*(?:with\s*)?=?\s*-?\d+/gi, ' ')
+      .replace(/(?:^|\s)increment\s*(?:by\s*)?=?\s*-?\d+/gi, ' ')
+      .replace(/\b(?:no)?order\b/gi, ' ')
+      .replace(/\bcomment\s*(?:=\s*)?'(?:[^']|'')*'/gi, ' ')
+      .trim();
+    if (leftovers.length > 0) throw unsupported(`CREATE SEQUENCE ... ${leftovers}`);
+
+    // A descending sequence needs its range spelled out: DuckDB's default maximum
+    // of -1 refuses a positive start value.
+    const range = step < 0 ? ' MINVALUE -9223372036854775808 MAXVALUE 9223372036854775807' : '';
+    const connection = await this.connectionFor(session);
+    await connection.execute(
+      `CREATE ${match[1] ? 'OR REPLACE ' : match[2] ? 'IF NOT EXISTS ' : ''}` +
+        `SEQUENCE ${qualifiedTable(resolved)}` +
+        `${start === undefined ? '' : ` START WITH ${start}`} INCREMENT BY ${step}${range}`,
+    );
+    this.catalog.sequenceStarts.set(key, start === undefined ? 1 : Number(start));
+    this.catalog.sequenceCreatedAt.set(key, new Date());
+    return statusOutcome(`${resolved.name} successfully created.`, STATEMENT_TYPES.create);
+  }
+
+  /**
+   * `ALTER SEQUENCE … RESTART [WITH n]` and `… SET INCREMENT [BY] n`. DuckDB has
+   * no ALTER for sequences, so the definition is read back and rewritten with
+   * `CREATE OR REPLACE`: a bare `RESTART` returns to the sequence's own start
+   * value, and `SET` keeps the value it would have handed out next, which is
+   * what Snowflake does.
+   */
+  private async handleAlterSequence(statement: string, session: Session): Promise<Outcome> {
+    const match =
+      /^alter\s+sequence\s+(if\s+exists\s+)?([\w$".]+(?:\s*\.\s*[\w$".]+){0,2})\s+(restart|set)\b([\s\S]*)$/i.exec(
+        statement,
+      );
+    if (!match) throw compilationError(`Unsupported ALTER SEQUENCE statement: ${statement}`);
+
+    const resolved = resolveTable(session, match[2]);
+    const key = `${resolved.database}.${resolved.schema}.${resolved.name}`;
+    const found = (await this.engine.listSequences(resolved.database, resolved.schema)).find(
+      (sequence) => sequence.name.toUpperCase() === resolved.name.toUpperCase(),
+    );
+    if (!found) {
+      if (match[1]) {
+        return statusOutcome(`${resolved.name} does not exist, statement succeeded.`, STATEMENT_TYPES.alter);
+      }
+      throw objectNotFound('SEQUENCE', key);
+    }
+
+    const tail = match[4].trim();
+    // `RESTART` does not change the sequence's start value, so a later bare
+    // RESTART still returns to the one it was created with.
+    const originalStart = this.catalog.sequenceStarts.get(key) ?? found.startValue;
+    let increment = found.increment;
+    let start: number;
+
+    if (/^restart/i.test(match[3])) {
+      const restart = /^(?:with\s*)?=?\s*(-?\d*)\s*$/i.exec(tail);
+      if (!restart) throw unsupported(`ALTER SEQUENCE ... RESTART ${tail}`.trim());
+      start = restart[1] === '' ? originalStart : Number(restart[1]);
+    } else {
+      const value = /(?:^|\s)increment\s*(?:by\s*)?=?\s*(-?\d+)/i.exec(tail)?.[1];
+      if (value === undefined) throw compilationError(`Unsupported ALTER SEQUENCE statement: ${statement}`);
+      if (Number(value) === 0) throw compilationError('Sequence increment cannot be zero.');
+
+      const leftovers = tail
+        .replace(/(?:^|\s)increment\s*(?:by\s*)?=?\s*-?\d+/gi, ' ')
+        .replace(/\b(?:no)?order\b/gi, ' ')
+        .replace(/\bcomment\s*(?:=\s*)?'(?:[^']|'')*'/gi, ' ')
+        .trim();
+      if (leftovers.length > 0) throw unsupported(`ALTER SEQUENCE ... ${leftovers}`);
+
+      increment = Number(value);
+      start = nextValueOf(found);
+    }
+
+    const range = increment < 0 ? ' MINVALUE -9223372036854775808 MAXVALUE 9223372036854775807' : '';
+    const connection = await this.connectionFor(session);
+    await connection.execute(
+      `CREATE OR REPLACE SEQUENCE ${qualifiedTable(resolved)} START WITH ${start}` +
+        ` INCREMENT BY ${increment}${found.cycle ? ' CYCLE' : ''}${range}`,
+    );
+    this.catalog.sequenceStarts.set(key, originalStart);
+    return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.alter);
   }
 
   private handleAlterSession(statement: string, session: Session): Outcome {
@@ -1223,6 +1539,45 @@ export class StatementRouter {
         );
       }
 
+      case 'sequences': {
+        const scope = stageScope(session, rest);
+        const rows: unknown[][] = [];
+        for (const database of this.catalog.databases.values()) {
+          if (scope !== null && database.name !== scope.database) continue;
+          for (const schema of database.schemas.keys()) {
+            if (scope !== null && scope.schema !== null && schema !== scope.schema) continue;
+            for (const sequence of await this.engine.listSequences(database.name, schema)) {
+              rows.push([
+                this.sequenceCreatedAt(database.name, schema, sequence.name),
+                sequence.name,
+                schema,
+                database.name,
+                String(nextValueOf(sequence)),
+                String(sequence.increment),
+                'SYSADMIN',
+                sequence.comment ?? '',
+                'YES',
+              ]);
+            }
+          }
+        }
+        return finish(
+          [
+            { name: 'created_on', duckType: 'TIMESTAMP_TZ' },
+            { name: 'name', duckType: 'VARCHAR' },
+            { name: 'schema_name', duckType: 'VARCHAR' },
+            { name: 'database_name', duckType: 'VARCHAR' },
+            { name: 'next_value', duckType: 'VARCHAR' },
+            { name: 'interval', duckType: 'VARCHAR' },
+            { name: 'owner', duckType: 'VARCHAR' },
+            { name: 'comment', duckType: 'VARCHAR' },
+            { name: 'ordered', duckType: 'VARCHAR' },
+          ],
+          rows,
+          1,
+        );
+      }
+
       case 'parameters': {
         const rows = [...session.parameters.entries()].map(([key, value]) => [
           key,
@@ -1247,16 +1602,104 @@ export class StatementRouter {
       }
 
       case 'grants': {
+        // Snowflake has three shapes here, and a client that reads one of them
+        // depends on the column order, so each is built separately: `OF ROLE`,
+        // `ON <object>`, and `[TO ROLE|USER]` — which is also the bare form.
+        const ofRole = /^\s*of\s+role\s+([\w$".]+)/i.exec(rest);
+        if (ofRole) {
+          const role = normalizeName(ofRole[1]);
+          const rows = this.catalog.grants
+            .filter((grant) => grant.grantedOn === 'ROLE' && grant.name === role)
+            .map((grant) => [
+              grant.createdAt,
+              grant.name,
+              grant.grantedTo,
+              grant.granteeName,
+              grant.grantedBy,
+            ]);
+          return finish(
+            [
+              { name: 'created_on', duckType: 'TIMESTAMP_TZ' },
+              { name: 'role', duckType: 'VARCHAR' },
+              { name: 'granted_to', duckType: 'VARCHAR' },
+              { name: 'grantee_name', duckType: 'VARCHAR' },
+              { name: 'granted_by', duckType: 'VARCHAR' },
+            ],
+            rows,
+            1,
+          );
+        }
+
+        const onObject =
+          /^\s*on\s+(account|(database|schema|table|view|stage|warehouse|role|user|function|procedure|file\s+format|sequence|integration)\s+([\w$".]+(?:\s*\.\s*[\w$".]+)*))/i.exec(
+            rest,
+          );
+        if (onObject) {
+          const grantedOn = onObject[2] ? onObject[2].toUpperCase().replace(/\s+/g, ' ') : 'ACCOUNT';
+          const name =
+            onObject[3] === undefined ? null : grantedNameFor(session, grantedOn, onObject[3]);
+          const rows = this.catalog.grants
+            .filter(
+              (grant) => grant.grantedOn === grantedOn && (name === null || grant.name === name),
+            )
+            .map((grant) => [
+              grant.createdAt,
+              grant.privilege,
+              grant.grantedOn,
+              grant.name,
+              grant.grantedTo,
+              grant.granteeName,
+              grant.grantOption ? 'TRUE' : 'FALSE',
+              'ROLE',
+              grant.grantedBy,
+            ]);
+          return finish(
+            [
+              { name: 'created_on', duckType: 'TIMESTAMP_TZ' },
+              { name: 'privilege', duckType: 'VARCHAR' },
+              { name: 'granted_on', duckType: 'VARCHAR' },
+              { name: 'name', duckType: 'VARCHAR' },
+              { name: 'granted_to', duckType: 'VARCHAR' },
+              { name: 'grantee_name', duckType: 'VARCHAR' },
+              { name: 'grant_option', duckType: 'VARCHAR' },
+              { name: 'granted_by_role_type', duckType: 'VARCHAR' },
+              { name: 'granted_by', duckType: 'VARCHAR' },
+            ],
+            rows,
+            3,
+          );
+        }
+
+        const target = /^\s*to\s+(role|user)\s+([\w$".]+)/i.exec(rest);
+        const grantedTo = target ? (target[1].toUpperCase() as 'ROLE' | 'USER') : 'USER';
+        const granteeName = normalizeName(target ? target[2] : session.user);
+        const rows = this.catalog.grants
+          .filter((grant) => grant.grantedTo === grantedTo && grant.granteeName === granteeName)
+          .map((grant) => [
+            grant.createdAt,
+            grant.privilege,
+            grant.grantedOn,
+            grant.name,
+            grant.grantedTo === 'ROLE' ? grant.granteeName : null,
+            grant.grantedTo,
+            grant.granteeName,
+            grant.grantOption ? 'TRUE' : 'FALSE',
+            grant.grantedBy,
+          ]);
         return finish(
           [
             { name: 'created_on', duckType: 'TIMESTAMP_TZ' },
+            { name: 'privilege', duckType: 'VARCHAR' },
+            { name: 'granted_on', duckType: 'VARCHAR' },
+            { name: 'name', duckType: 'VARCHAR' },
             { name: 'role', duckType: 'VARCHAR' },
             { name: 'granted_to', duckType: 'VARCHAR' },
             { name: 'grantee_name', duckType: 'VARCHAR' },
             { name: 'grant_option', duckType: 'VARCHAR' },
             { name: 'granted_by', duckType: 'VARCHAR' },
           ],
-          [],
+          rows,
+          3,
         );
       }
 
@@ -1277,6 +1720,21 @@ export class StatementRouter {
       }
 
       case 'file formats': {
+        const scope = stageScope(session, rest);
+        const inScope = (format: { database: string; schema: string }): boolean =>
+          scope === null ||
+          (format.database === scope.database && (scope.schema === null || format.schema === scope.schema));
+        const rows = [...this.catalog.fileFormats.values()]
+          .filter(inScope)
+          .map((format) => [
+            format.createdAt,
+            format.name,
+            format.database,
+            format.schema,
+            format.type,
+            format.owner,
+            null,
+          ]);
         return finish(
           [
             { name: 'created_on', duckType: 'TIMESTAMP_TZ' },
@@ -1287,7 +1745,8 @@ export class StatementRouter {
             { name: 'owner', duckType: 'VARCHAR' },
             { name: 'comment', duckType: 'VARCHAR' },
           ],
-          [],
+          rows,
+          1,
         );
       }
 
@@ -1302,10 +1761,16 @@ export class StatementRouter {
   // ---------------------------------------------------------------------------
 
   private async handleDescribe(statement: string, session: Session): Promise<Outcome> {
-    const match = /^desc(?:ribe)?\s+(?:table\s+|view\s+)?(.+)$/i.exec(statement);
+    const match = /^desc(?:ribe)?\s+(?:(table|view|stage|file\s+format|sequence)\s+)?(.+)$/i.exec(statement);
     if (!match) throw compilationError(`Unsupported DESCRIBE statement: ${statement}`);
 
-    const resolved = resolveTable(session, match[1]);
+    const kind = (match[1] ?? 'table').toLowerCase().replace(/\s+/g, ' ');
+    const target = match[2].trim();
+    if (kind === 'stage') return this.describeStage(session, target);
+    if (kind === 'file format') return this.describeFileFormat(session, target);
+    if (kind === 'sequence') return this.describeSequence(session, target);
+
+    const resolved = resolveTable(session, target);
     const columns = await this.engine.describeTable(resolved.database, resolved.schema, resolved.name);
     if (columns.length === 0) {
       throw objectNotFound(
@@ -1343,6 +1808,74 @@ export class StatementRouter {
         { name: 'policy name', duckType: 'VARCHAR' },
       ],
       rows,
+      STATEMENT_TYPES.describe,
+    );
+  }
+
+  /**
+   * `DESCRIBE STAGE` / `DESCRIBE FILE FORMAT` answer in Snowflake's property
+   * table — five columns — rather than in the column list a table returns.
+   */
+  private describeStage(session: Session, name: string): Outcome {
+    const resolved = resolveTable(session, name);
+    const key = `${resolved.database}.${resolved.schema}.${resolved.name}`;
+    const stage = this.catalog.stages.get(key);
+    if (!stage) throw objectNotFound('STAGE', key);
+
+    const rows = [
+      [null, 'url', 'STAGE_URL', stage.url ?? '', null],
+      [null, 'has_credentials', 'BOOLEAN', 'FALSE', 'FALSE'],
+      [null, 'create_on', 'TIMESTAMP', formatTimestamp(stage.createdAt ?? new Date()), null],
+      [null, 'type', 'STAGE_TYPE', stage.url === null ? 'INTERNAL' : 'EXTERNAL', null],
+      [null, 'owner', 'ROLE', 'SYSADMIN', null],
+      [null, 'comment', 'STRING', null, null],
+      [null, 'directory_enabled', 'BOOLEAN', 'FALSE', 'FALSE'],
+    ];
+    return syntheticOutcome(DESCRIBE_PROPERTY_COLUMNS, rows, STATEMENT_TYPES.describe);
+  }
+
+  private describeFileFormat(session: Session, name: string): Outcome {
+    const resolved = resolveTable(session, name);
+    const key = `${resolved.database}.${resolved.schema}.${resolved.name}`;
+    const format = this.catalog.getFileFormat(resolved.database, resolved.schema, resolved.name);
+    if (!format) throw objectNotFound('FILE FORMAT', key);
+
+    const rows: unknown[][] = [[null, 'type', 'STRING', format.type, 'CSV']];
+    for (const option of format.options.matchAll(/\b([A-Za-z_][\w$]*)\s*=\s*('(?:[^']|'')*'|[^\s,]+)/g)) {
+      if (option[1].toUpperCase() === 'TYPE') continue;
+      rows.push([null, option[1].toLowerCase(), 'STRING', option[2].replace(/^'(.*)'$/s, '$1'), null]);
+    }
+    rows.push([null, 'owner', 'ROLE', format.owner, null]);
+    rows.push([null, 'create_on', 'TIMESTAMP', formatTimestamp(format.createdAt), null]);
+    return syntheticOutcome(DESCRIBE_PROPERTY_COLUMNS, rows, STATEMENT_TYPES.describe);
+  }
+
+  /** `DESCRIBE SEQUENCE` answers with the single row Snowflake returns for one. */
+  private async describeSequence(session: Session, name: string): Promise<Outcome> {
+    const resolved = resolveTable(session, name);
+    const key = `${resolved.database}.${resolved.schema}.${resolved.name}`;
+    const found = (await this.engine.listSequences(resolved.database, resolved.schema)).find(
+      (sequence) => sequence.name.toUpperCase() === resolved.name.toUpperCase(),
+    );
+    if (!found) throw objectNotFound('SEQUENCE', key);
+
+    return syntheticOutcome(
+      [
+        { name: 'created_on', duckType: 'TIMESTAMP_TZ' },
+        { name: 'name', duckType: 'VARCHAR' },
+        { name: 'next_value', duckType: 'VARCHAR' },
+        { name: 'interval', duckType: 'VARCHAR' },
+        { name: 'ordered', duckType: 'VARCHAR' },
+      ],
+      [
+        [
+          this.sequenceCreatedAt(resolved.database, resolved.schema, found.name),
+          found.name,
+          String(nextValueOf(found)),
+          String(found.increment),
+          'YES',
+        ],
+      ],
       STATEMENT_TYPES.describe,
     );
   }
@@ -1415,12 +1948,26 @@ export class StatementRouter {
             ...stage,
             url: /url\s*=\s*'([^']*)'/i.exec(rest)?.[1] ?? null,
             directory,
+            createdAt: new Date(),
           });
           await this.dataDir?.saveStages(this.catalog.stages.values());
           return statusOutcome(`Stage area ${stage.name} successfully created.`, STATEMENT_TYPES.create);
         }
-        case 'file format':
-          return statusOutcome('File format successfully created.', STATEMENT_TYPES.create);
+        case 'file format': {
+          const format = resolveTable(session, name);
+          if (!this.catalog.getSchema(format.database, format.schema)) {
+            throw objectNotFound('SCHEMA', `${format.database}.${format.schema}`);
+          }
+          const options = rest.trim();
+          this.catalog.defineFileFormat({
+            ...format,
+            type: /\btype\s*=\s*([\w$]+)/i.exec(options)?.[1]?.toUpperCase() ?? 'CSV',
+            options,
+            owner: session.role,
+            createdAt: new Date(),
+          });
+          return statusOutcome(`${format.name} successfully created.`, STATEMENT_TYPES.create);
+        }
         case 'user':
           return statusOutcome('User successfully created.', STATEMENT_TYPES.create);
         default:
@@ -1448,6 +1995,9 @@ export class StatementRouter {
           await this.engine.dropDatabase(key);
           this.catalog.dropDatabase(key);
           await this.removeStages(key);
+          // A dropped database takes its file formats and grants with it.
+          this.catalog.dropFileFormatsIn(key);
+          this.catalog.purgeGrantsFor(key);
           // Snowflake leaves every session with no current database, not just this one.
           if (session.database === key) {
             session.database = null;
@@ -1466,6 +2016,8 @@ export class StatementRouter {
           await this.engine.dropSchema(resolved.database, resolved.schema, !/^\s*restrict\b/i.test(rest));
           this.catalog.dropSchema(resolved.database, resolved.schema);
           await this.removeStages(resolved.database, resolved.schema);
+          this.catalog.dropFileFormatsIn(resolved.database, resolved.schema);
+          this.catalog.purgeGrantsFor(`${resolved.database}.${resolved.schema}`);
           if (session.database === resolved.database && session.schema === resolved.schema) {
             session.schema = null;
           }
@@ -1484,12 +2036,20 @@ export class StatementRouter {
         case 'stage': {
           const stage = resolveTable(session, name);
           this.catalog.dropStage(stage.database, stage.schema, stage.name);
+          this.catalog.purgeGrantsFor(`${stage.database}.${stage.schema}.${stage.name}`);
           await this.dataDir?.saveStages(this.catalog.stages.values());
           await this.stages.removeAll(await this.stages.directoryFor(stage.database, stage.schema, stage.name));
           return statusOutcome('Stage area successfully dropped.', STATEMENT_TYPES.drop);
         }
-        case 'file format':
-          return statusOutcome('File format successfully dropped.', STATEMENT_TYPES.drop);
+        case 'file format': {
+          const format = resolveTable(session, name);
+          if (!this.catalog.dropFileFormat(format.database, format.schema, format.name)) {
+            if (ifExists) return alreadyDropped(format.name);
+            throw objectNotFound('FILE FORMAT', `${format.database}.${format.schema}.${format.name}`);
+          }
+          this.catalog.purgeGrantsFor(`${format.database}.${format.schema}.${format.name}`);
+          return statusOutcome(`${format.name} successfully dropped.`, STATEMENT_TYPES.drop);
+        }
         case 'user':
           return statusOutcome('User successfully dropped.', STATEMENT_TYPES.drop);
         default:
