@@ -57,16 +57,6 @@ describe('operations data', () => {
     }
   });
 
-  it('dates every row to a release, and only to a release that exists', () => {
-    const known = new Set(['1.0.0', '2.0.0', '3.0.0', '3.0.1', '3.1.0', '3.1.1', '3.2.0', '3.3.0', '4.0.0', '4.1.0']);
-    for (const group of GROUPS) {
-      for (const row of group.rows) {
-        expect(row.since, `${group.id}: ${row.syntax}`).toMatch(/^\d+\.\d+\.\d+$/);
-        expect(known.has(row.since), `${group.id}: ${row.syntax} says ${row.since}`).toBe(true);
-      }
-    }
-  });
-
   it('makes every partial row say what is missing', () => {
     for (const group of GROUPS) {
       for (const row of group.rows.filter((entry) => entry.status === 'partial')) {

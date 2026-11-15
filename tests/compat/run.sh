@@ -13,10 +13,54 @@ export PYTHONUTF8=1
 PORT="${SNOWTEST_TEST_PORT:-18080}"
 LOG="${SNOWTEST_TEST_LOG:-/tmp/snowtest-compat.log}"
 
+# The pin lives in versions.json so this suite, the dbt suite and CI cannot drift
+# apart. SNOWTEST_CONNECTOR overrides it for a one-off, either as a bare version
+# or as a full requirement, which is what CI passes through.
+CONNECTOR="${SNOWTEST_CONNECTOR:-$(node -p "require('./versions.json').connector")}"
+if [ -z "${CONNECTOR}" ]; then
+  echo "versions.json has no \"connector\" pin" >&2
+  exit 1
+fi
+case "$CONNECTOR" in
+  *==*) REQUIREMENT="$CONNECTOR" ;;
+  *) REQUIREMENT="snowflake-connector-python==${CONNECTOR}" ;;
+esac
+
 if [ ! -x .venv/bin/python ]; then
-  echo "creating .venv and installing snowflake-connector-python…"
+  echo "creating .venv…"
   python3 -m venv .venv
-  ./.venv/bin/pip install -q --disable-pip-version-check 'snowflake-connector-python==5.1.*'
+fi
+
+installed_connector() {
+  ./.venv/bin/python - <<'PY' 2>/dev/null || echo missing
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    print(version("snowflake-connector-python"))
+except PackageNotFoundError:
+    print("missing")
+PY
+}
+
+# A stale .venv is the failure this prevents: before, whichever suite ran last
+# decided what this one tested, so a green run proved nothing about the pin.
+WANT="${REQUIREMENT##*==}"
+HAVE=$(installed_connector)
+OK=1
+case "$WANT" in
+  *'*'*)
+    case "$HAVE" in
+      "${WANT%%\**}"*) ;;
+      *) OK=0 ;;
+    esac
+    ;;
+  *)
+    [ "$HAVE" = "$WANT" ] || OK=0
+    ;;
+esac
+if [ "$OK" -ne 1 ]; then
+  echo "connector ${HAVE} → installing ${REQUIREMENT}"
+  ./.venv/bin/pip install -q --disable-pip-version-check "$REQUIREMENT"
 fi
 
 healthy() { curl -sf "http://127.0.0.1:${PORT}/_snowtest/health" >/dev/null 2>&1; }

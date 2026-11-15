@@ -24,18 +24,21 @@ DBT_ARGS=(--project-dir "$ROOT/tests/dbt" --profiles-dir "$ROOT/tests/dbt")
 if [ ! -x "$PY" ]; then
   python3 -m venv .venv
 fi
-# Stage transfers answer with a LOCAL_FS location: the connector copies files
-# straight into the stage directory. Connector 4.x implements that; 5.x rejects
-# the location type outright ("Unknown location type: LOCAL_FS"), so the staged
-# -file checks only mean something on 4.x. Override with SNOWTEST_DBT_CONNECTOR.
-CONNECTOR="${SNOWTEST_DBT_CONNECTOR:-4.8.*}"
+# All three pins come from versions.json, the one file that owns them. Stage
+# transfers answer with a LOCAL_FS location, which connector 4.x implements and
+# 5.x rejects outright ("Unknown location type: LOCAL_FS"), so the staged-file
+# checks only mean something on 4.x. Override with SNOWTEST_DBT_CONNECTOR.
+CONNECTOR="${SNOWTEST_DBT_CONNECTOR:-$(node -p "require('./versions.json').connector")}"
+if [ -z "${CONNECTOR}" ]; then
+  echo "versions.json has no \"connector\" pin" >&2
+  exit 1
+fi
 
-# Both pinned on purpose: dbt-snowflake allows a pre-release core, so an
-# unpinned resolve installs a beta. The guard compares what .venv holds against
-# these, not just whether dbt imports, or a stale venv keeps a pair the README
-# does not claim. Bump both together and re-run the suite.
-DBT_CORE=1.12.7
-DBT_ADAPTER=1.12.5
+# dbt-snowflake allows a pre-release core, so an unpinned resolve installs a
+# beta. The guard compares what .venv holds against the pins, not just whether
+# dbt imports, or a stale venv keeps a pair nothing else claims.
+DBT_CORE=$(node -p "require('./versions.json').dbt.core")
+DBT_ADAPTER=$(node -p "require('./versions.json').dbt.snowflake")
 HAVE=$("$PY" - <<'PY' 2>/dev/null || true
 from importlib.metadata import version, PackageNotFoundError
 
