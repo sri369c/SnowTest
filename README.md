@@ -322,7 +322,7 @@ insecure transport. TLS is not built in yet.
 |---|---|
 | `GET /_snowtest/health` | Liveness probe |
 | `GET /_snowtest/state` | Current databases, schemas, warehouses, roles, sessions |
-| `POST /_snowtest/seed` | Run a SQL script (`{"sql": "..."}`) on a scratch session |
+| `POST /_snowtest/seed` | Run a SQL script (`{"sql": "..."}`) on a scratch session; with no `sql` in the body, load the bundled `data/examples.sql` |
 | `POST /_snowtest/reset` | Drop all data, persisted database files included, and recreate the configured catalog |
 
 `POST /_snowtest/reset` between tests is the closest thing to a clean
@@ -330,6 +330,17 @@ Snowflake account:
 
 ```python
 requests.post("http://localhost:3030/_snowtest/reset")
+```
+
+The bundled example dataset loads the same way, with an empty body: five tables
+under `SNOWTEST.EXAMPLES`, built with `CREATE OR REPLACE`, so reseeding replaces
+them rather than appending and a second run leaves the same rows. On the landing
+page the `POST /_snowtest/seed` row on the **Control plane** tab is a button that
+asks first.
+
+```bash
+curl -s -X POST http://localhost:3030/_snowtest/seed \
+  -H 'Content-Type: application/json' -d '{}'
 ```
 
 ## Configuration

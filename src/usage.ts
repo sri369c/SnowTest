@@ -112,7 +112,7 @@ const CONTROL_PLANE = `<table>
   <tbody>
       <tr><td><code>GET /_snowtest/health</code></td><td>Liveness, plus both versions: the emulated Snowflake release and snowtest's own.</td></tr>
       <tr><td><code>GET /_snowtest/state</code></td><td>Databases, schemas, warehouses, roles, stages and the session count.</td></tr>
-      <tr><td><code>POST /_snowtest/seed</code></td><td>Run a SQL script sent as <code>{"sql": "…"}</code>; statements split on <code>;</code>.</td></tr>
+      <tr><td><code>POST /_snowtest/seed</code></td><td>Run a SQL script sent as <code>{"sql": "…"}</code>; statements split on <code>;</code>. Leave <code>sql</code> out of the body to load the bundled example tables instead.</td></tr>
       <tr><td><code>POST /_snowtest/reset</code></td><td>Drop everything, persisted database files included, and recreate the configured catalog.</td></tr>
   </tbody>
 </table>

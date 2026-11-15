@@ -207,7 +207,8 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'POST /_snowtest/seed',
-        behaviour: 'Runs a SQL script sent as `{"sql": "..."}`.',
+        behaviour:
+          'Runs a SQL script sent as `{"sql": "..."}`; with no `sql` in the body, loads the bundled example tables.',
         status: 'supported',
         since: '1.0.0',
       },

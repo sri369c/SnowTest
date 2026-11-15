@@ -56,7 +56,7 @@ export interface HomeState {
   /** Statements in the timings table, not just the ones the page lists. */
   queryCount: number;
   /** What a clear just did, carried across the reload that follows it. */
-  notice?: { kind: 'timings' | 'reset'; text: string } | null;
+  notice?: { kind: 'timings' | 'reset' | 'seed'; text: string } | null;
 }
 
 /** Home's tabs; the catalog browser repeats them as links, with Live state current. */
@@ -107,7 +107,8 @@ const REFRESH_SCRIPT = `<script>
 })();
 </script>`;
 
-// The Clear Data tab is static, so its listeners can hold their elements.
+// The Clear Data and Control plane tabs are static, so their listeners can hold
+// their elements.
 const CLEAR_SCRIPT = `<script>
 (() => {
   const WORD = 'Delete All Data';
@@ -138,7 +139,8 @@ const CLEAR_SCRIPT = `<script>
   // A confirmation is for the click that caused it, not for every refresh after.
   // The flag lives in the URL so it survives the redirect, and is dropped as soon
   // as the page renders: the banner stays on screen, a reload no longer shows it.
-  if (new URLSearchParams(location.search).has('cleared')) {
+  const flag = new URLSearchParams(location.search);
+  if (flag.has('cleared') || flag.has('seeded')) {
     history.replaceState(null, '', location.pathname + location.hash);
   }
 
@@ -148,6 +150,31 @@ const CLEAR_SCRIPT = `<script>
   for (const form of document.querySelectorAll('.modal form')) {
     form.addEventListener('submit', (event) => event.preventDefault());
   }
+
+  const seedDialog = document.getElementById('seed-dialog');
+  const seedError = document.getElementById('seed-error');
+  document.getElementById('seed-open').addEventListener('click', () => {
+    seedError.hidden = true;
+    seedDialog.showModal();
+  });
+  document.getElementById('seed-yes').addEventListener('click', async (event) => {
+    event.target.disabled = true;
+    seedError.hidden = true;
+    try {
+      const response = await fetch('/_snowtest/seed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      location.replace('/?seeded=examples#control');
+    } catch (problem) {
+      event.target.disabled = false;
+      seedDialog.close();
+      seedError.hidden = false;
+      seedError.textContent = 'Seeding failed: ' + problem.message;
+    }
+  });
 
   document.getElementById('clear-timings-yes').addEventListener('click', async (event) => {
     event.target.disabled = true;
@@ -370,7 +397,7 @@ ${surfaceRows}
 </p>`;
 
   // Each confirmation belongs to the block that caused it, under its heading.
-  const noticeFor = (kind: 'timings' | 'reset'): string =>
+  const noticeFor = (kind: 'timings' | 'reset' | 'seed'): string =>
     state.notice && state.notice.kind === kind
       ? `\n    <p class="ok" role="status">${escapeHtml(state.notice.text)}</p>`
       : '';
@@ -460,9 +487,9 @@ ${queryRows}
 </table>
 </div>`;
 
-  // Only the read-only endpoints are links. A link is a GET, and the rest of this
-  // table drops or changes things, so those stay plain labels you cannot click by
-  // accident.
+  // Only the read-only endpoints are links: a link is a GET. Seed is a button of its
+  // own because it asks first and then posts; reset and clear stay labels, since a
+  // pill you can click by accident is the last thing they need.
   const endpointRow = (title: string, what: string, path?: string): string => {
     const label = `<code>${title}</code>`;
     const cell = path
@@ -471,13 +498,32 @@ ${queryRows}
     return `  <tr><th>${cell}</th><td>${what}</td></tr>`;
   };
 
+  const seedRow = `  <tr><th><button type="button" class="endpoint" id="seed-open" aria-haspopup="dialog" title="Seed the example tables (asks first)"><code>POST /_snowtest/seed</code></button></th><td>run a SQL script: <code>{"sql": "..."}</code>, or the bundled examples when the body carries none</td></tr>`;
+
   const control = `<table>
 ${endpointRow('GET /_snowtest/health', 'liveness probe', '/_snowtest/health')}
 ${endpointRow('GET /_snowtest/state', 'databases, schemas, warehouses, roles, stages, sessions', '/_snowtest/state')}
-${endpointRow('POST /_snowtest/seed', 'run a SQL script: <code>{"sql": "..."}</code>')}
+${seedRow}
 ${endpointRow('POST /_snowtest/reset', 'drop everything, persisted files included, and recreate the configured catalog')}
 ${endpointRow('POST /_snowtest/queries/clear', 'empty the query timings table')}
-</table>`;
+</table>
+${noticeFor('seed')}
+<p class="warn" id="seed-error" hidden></p>
+
+<dialog class="modal" id="seed-dialog" aria-labelledby="seed-title">
+  <form method="dialog">
+    <h3 id="seed-title">Seed the example tables?</h3>
+    <p class="muted">
+      <code>data/examples.sql</code> replaces the five tables under
+      <code>SNOWTEST.EXAMPLES</code>, so edits you made to them are lost. Nothing else is
+      touched.
+    </p>
+    <div class="modal-actions">
+      <button type="button" class="refresh" data-close>Cancel</button>
+      <button type="button" class="refresh" id="seed-yes">Seed examples</button>
+    </div>
+  </form>
+</dialog>`;
 
   const connect = renderTabs(
     [
