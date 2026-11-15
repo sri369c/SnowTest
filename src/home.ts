@@ -66,34 +66,37 @@ export const HOME_TABS = [
   { id: 'connect', label: 'Connect' },
   { id: 'speaks', label: 'What it speaks' },
   { id: 'control', label: 'Control plane' },
+  { id: 'timings', label: 'Query timings' },
   { id: 'clear', label: 'Clear Data' },
 ] as const;
 
 const REFRESH_ICON =
   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>';
 
-// Re-fetches `/` and swaps in its #live-body; a failure is shown, never left looking current.
-const LIVE_SCRIPT = `<script>
+/**
+ * A Refresh button beside a live stamp: re-fetches `/` and swaps exactly one
+ * region, so each tab updates on its own without a full page reload. A failure
+ * is shown, never left looking current.
+ */
+function refreshScript(buttonId: string, stampId: string, bodyId: string): string {
+  return `<script>
 (() => {
-  const button = document.getElementById('live-refresh');
-  const at = document.getElementById('live-at');
+  const button = document.getElementById('${buttonId}');
+  const at = document.getElementById('${stampId}');
   const stamp = () => { at.textContent = 'updated ' + new Date().toLocaleTimeString(); };
   stamp();
-  const reload = async () => {
-    const response = await fetch('/', { cache: 'no-store' });
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-    const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-    const fresh = doc.getElementById('live-body');
-    if (!fresh) throw new Error('live section missing from response');
-    document.getElementById('live-body').replaceWith(fresh);
-    stamp();
-  };
   button.addEventListener('click', async () => {
     button.classList.add('busy');
     button.classList.remove('err');
     button.disabled = true;
     try {
-      await reload();
+      const response = await fetch('/', { cache: 'no-store' });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+      const fresh = doc.getElementById('${bodyId}');
+      if (!fresh) throw new Error('${bodyId} missing from response');
+      document.getElementById('${bodyId}').replaceWith(fresh);
+      stamp();
     } catch (error) {
       button.classList.add('err');
       at.textContent = 'refresh failed: ' + error.message;
@@ -104,6 +107,10 @@ const LIVE_SCRIPT = `<script>
   });
 })();
 </script>`;
+}
+
+const LIVE_SCRIPT = refreshScript('live-refresh', 'live-at', 'live-body');
+const TIMINGS_SCRIPT = refreshScript('timings-refresh', 'timings-at', 'timings-body');
 
 // The Clear Data tab is static, so its listeners can hold their elements.
 const CLEAR_SCRIPT = `<script>
@@ -315,17 +322,6 @@ ${databaseRows}
   <tr><th>User</th><th>Context</th><th>Role</th><th>Started (server time)</th><th>Length</th></tr>
 ${sessionRows}
 </table>
-
-<h3>Query timings</h3>
-<table>
-  <tr><th>Started (server time)</th><th>User</th><th>Statement</th><th>Took</th><th>Rows</th><th>Status</th></tr>
-${queryRows}
-</table>
-<p class="muted">
-  Every statement is timed and kept in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, so you can
-  query it from a client. Nothing here is removed on its own — empty it from the
-  <a href="#clear">Clear Data</a> tab.
-</p>
 </div>`;
 
   const python = `<pre><code>import snowflake.connector
@@ -448,6 +444,20 @@ ${surfaceRows}
   </form>
 </dialog>`;
 
+  // `timings-body` is swapped in place by this tab's own refresh button.
+  const timings = `<div class="livebar"><span class="muted" id="timings-at" aria-live="polite"></span><button type="button" class="refresh" id="timings-refresh" title="Refresh the query timings">${REFRESH_ICON}Refresh</button></div>
+<div id="timings-body">
+<p class="muted">
+  Every statement the server runs, newest first, the way Snowflake keeps it in
+  <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>. That table is a real one —
+  query it from a client for anything older than this preview.
+</p>
+<table>
+  <tr><th>Started (server time)</th><th>User</th><th>Statement</th><th>Took</th><th>Rows</th><th>Status</th></tr>
+${queryRows}
+</table>
+</div>`;
+
   const control = `<table>
   <tr><th><code>GET /_snowtest/health</code></th><td>liveness probe</td></tr>
   <tr><th><code>GET /_snowtest/state</code></th><td>databases, schemas, warehouses, roles, stages, sessions</td></tr>
@@ -475,11 +485,12 @@ ${surfaceRows}
 ${renderTabs(
   HOME_TABS.map((tab) => ({
     ...tab,
-    html: { overview, live, connect, speaks, control, clear: clearPane }[tab.id],
+    html: { overview, live, connect, speaks, control, timings, clear: clearPane }[tab.id],
   })),
   { hash: true },
 )}
 ${LIVE_SCRIPT}
+${TIMINGS_SCRIPT}
 ${CLEAR_SCRIPT}`;
 
   return renderPage({ title: 'snowtest — Snowflake-compatible stub server', body, version, nav: 'home' });
