@@ -460,12 +460,23 @@ ${queryRows}
 </table>
 </div>`;
 
+  // Only the read-only endpoints are links. A link is a GET, and the rest of this
+  // table drops or changes things, so those stay plain labels you cannot click by
+  // accident.
+  const endpointRow = (title: string, what: string, path?: string): string => {
+    const label = `<code>${title}</code>`;
+    const cell = path
+      ? `<a class="endpoint" href="${path}" target="_blank" rel="noreferrer">${label}</a>`
+      : label;
+    return `  <tr><th>${cell}</th><td>${what}</td></tr>`;
+  };
+
   const control = `<table>
-  <tr><th><code>GET /_snowtest/health</code></th><td>liveness probe</td></tr>
-  <tr><th><code>GET /_snowtest/state</code></th><td>databases, schemas, warehouses, roles, stages, sessions</td></tr>
-  <tr><th><code>POST /_snowtest/seed</code></th><td>run a SQL script: <code>{"sql": "..."}</code></td></tr>
-  <tr><th><code>POST /_snowtest/reset</code></th><td>drop everything, persisted files included, and recreate the configured catalog</td></tr>
-  <tr><th><code>POST /_snowtest/queries/clear</code></th><td>empty the query timings table</td></tr>
+${endpointRow('GET /_snowtest/health', 'liveness probe', '/_snowtest/health')}
+${endpointRow('GET /_snowtest/state', 'databases, schemas, warehouses, roles, stages, sessions', '/_snowtest/state')}
+${endpointRow('POST /_snowtest/seed', 'run a SQL script: <code>{"sql": "..."}</code>')}
+${endpointRow('POST /_snowtest/reset', 'drop everything, persisted files included, and recreate the configured catalog')}
+${endpointRow('POST /_snowtest/queries/clear', 'empty the query timings table')}
 </table>`;
 
   const connect = renderTabs(

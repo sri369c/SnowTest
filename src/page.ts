@@ -66,6 +66,9 @@ const STYLES = `
   ul { margin: .5rem 0; padding-left: 1.2rem; }
   li { margin: .25rem 0; }
   a { color: #0969da; }
+  a.endpoint { text-decoration: none; }
+  a.endpoint code { color: inherit; }
+  a.endpoint:hover code { color: #0969da; border-color: #0969da; }
   .warn { border-left: 3px solid #bf8700; padding-left: .9rem; color: #57606a; }
   footer { margin-top: 3rem; font-size: .85rem; color: #57606a; }
 
