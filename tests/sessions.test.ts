@@ -97,6 +97,27 @@ describe('session lifecycle', () => {
   });
 });
 
+describe('login allow-list', () => {
+  it('refuses a name that SNOWTEST_USERS does not list, and accepts one it does', async () => {
+    const server = await createServer({ dataDir: null, users: ['ALICE'] });
+    const attempt = async (name: string) => {
+      const response = await server.app.request('/session/v1/login-request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: { LOGIN_NAME: name } }),
+      });
+      return (await response.json()) as { success: boolean };
+    };
+
+    try {
+      expect((await attempt('BOB')).success).toBe(false);
+      expect((await attempt('alice')).success).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+});
+
 describe('request body limit', () => {
   let server: SnowtestServer;
   let running: { port: number; close: () => Promise<void> };
