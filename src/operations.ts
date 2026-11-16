@@ -181,12 +181,19 @@ export const GROUPS: OperationGroup[] = [
         status: 'supported',
         since: '3.0.0',
       },
-      {
-        syntax: 'GET /troubleshooting',
-        behaviour: 'Common symptoms, their causes and fixes.',
-        status: 'supported',
-        since: '3.0.0',
-      },
+              {
+          syntax: 'GET /troubleshooting',
+          behaviour: 'Common symptoms, their causes and fixes.',
+          status: 'supported',
+          since: '3.0.0',
+        },
+        {
+          syntax: 'GET /self-test, POST /_snowtest/self-test',
+          behaviour:
+            'Checks run against the running instance over its own endpoints, each reporting how many of its assertions passed. Writes only to a scratch database, and drops it.',
+          status: 'supported',
+          since: '4.2.0',
+        },
       {
         syntax: 'GET /browse/:database/:schema[/:table]',
         behaviour: 'Catalog browser: objects, row counts, and a preview of the first rows of any table or view.',

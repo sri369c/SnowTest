@@ -37,6 +37,7 @@ import {
 } from './browse.js';
 import { renderHome, type HomeDatabaseState, type HomeQueryState } from './home.js';
 import { renderOperations } from './operations.js';
+import { renderSelfTest, runSelfChecks } from './selfcheck.js';
 import { renderConfiguration, renderTroubleshooting } from './usage.js';
 import { PACKAGE_VERSION } from './version.js';
 import { StatementRouter, type Outcome } from './meta.js';
@@ -451,6 +452,8 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   app.get('/usage', (c) => c.redirect('/configuration', 301));
   app.get('/troubleshooting', (c) => c.html(renderTroubleshooting(SERVER_VERSION)));
 
+  app.get('/self-test', (c) => c.html(renderSelfTest(SERVER_VERSION)));
+
   // ---------------------------------------------------------------------------
   // Catalog browser, read-only: the counts on `/` are a link into the data.
   // Object names are resolved against the catalog, so nothing a URL carries is
@@ -577,6 +580,24 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
       })),
     }),
   );
+
+  // One run at a time: the checks write to a fixed scratch database, so two runs
+  // at once would collide. A second request while one is in flight is refused.
+  let selfTestRunning = false;
+  app.post('/_snowtest/self-test', async (c) => {
+    if (selfTestRunning) return c.json({ error: 'A self test is already running.' }, 409);
+    selfTestRunning = true;
+    try {
+      const report = await runSelfChecks(async (path, init) => app.request(path, init));
+      log(
+        `self test ${report.checks.length - report.failedChecks}/${report.checks.length} checks, ` +
+          `${report.passed}/${report.total} assertions`,
+      );
+      return c.json(report);
+    } finally {
+      selfTestRunning = false;
+    }
+  });
 
   app.post('/_snowtest/queries/clear', async (c) =>
     c.json({ cleared: await engine.clearQueryHistory() }),

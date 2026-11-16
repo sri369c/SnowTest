@@ -9,13 +9,14 @@
  * snowtest implement staging with real files on disk instead of emulating
  * cloud object storage and presigned URLs.
  *
- * Every stage therefore owns a directory; `@stage/path` maps onto a path inside
- * it and nothing outside it.
+ * Every stage therefore owns a directory. The only paths joined onto it come
+ * from walking that directory (`list`), never from client input, which is what
+ * keeps `@stage/../..` from meaning anything: there is no client path to resolve.
  */
 
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve, sep } from 'node:path';
+import { basename, join } from 'node:path';
 
 export interface StagedFile {
   /** Path relative to the stage root, e.g. `orders/data.csv`. */
@@ -41,20 +42,6 @@ export class StageStore {
     const directory = join(this.root, safeSegment(database), safeSegment(schema), safeSegment(name));
     await mkdir(directory, { recursive: true });
     return directory;
-  }
-
-  /**
-   * Resolve a stage-relative path to an absolute one, refusing anything that
-   * would escape the stage directory (`@stage/../../etc/passwd`).
-   */
-  resolveWithin(directory: string, stagePath: string): string {
-    const cleaned = stagePath.replace(/^@?[^/]*\//, '').replace(/^\/+/, '');
-    const target = resolve(directory, cleaned);
-    const base = resolve(directory);
-    if (target !== base && !target.startsWith(base + sep)) {
-      throw new Error(`Path '${stagePath}' escapes the stage directory.`);
-    }
-    return target;
   }
 
   /** Files under a directory, relative to it, filtered by SQL `LIKE` pattern. */
