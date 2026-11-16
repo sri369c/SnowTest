@@ -7,8 +7,8 @@ Snowflake account. This document explains **what was built, why it is shaped
 this way, and where the sharp edges are**. For commands, see the README and the
 running server's `/configuration` page.
 
-- **Status:** working; `snowflake-connector-python` 5.1 is pinned in the test
-  suite, 3.16 and 4.8 were checked manually; `dbt-snowflake` 1.12 over key-pair
+- **Status:** working; `snowflake-connector-python` 4.8.1 is what the Python
+  suites run (`versions.json`); `dbt-snowflake` 1.12.5 and `dbt-core` 1.12.7 over key-pair
   auth.
 - **Not** a Snowflake replacement: no warehouses, no privileges, no cloud
   storage, no multi-node behaviour.
@@ -390,7 +390,7 @@ Consequences, stated plainly:
 
 ## 10. dbt compatibility
 
-Verified by `npm run test:dbt`, on the pair pinned in `tests/dbt/run.sh`
+Verified by `npm run test:dbt`, on the pair pinned in `versions.json`
 (dbt-core 1.12.7, dbt-snowflake 1.12.5): `dbt debug`, `dbt run` (view, table,
 incremental), `dbt seed` twice, `dbt test`, and the stage cycle.
 
@@ -430,12 +430,12 @@ about it:
 ## 11. Verification strategy
 
 The only trustworthy oracle is the real client. Three suites; the Python suites
-pin connector 5.1, and connector 3.16 and 4.8 were checked manually:
+pin the connector named in `versions.json` (4.8.1):
 
 ```mermaid
 flowchart LR
   A["npm test<br/>vitest"] --> A1["dialect rules, engine behaviour,<br/>persistence, config, pages"]
-  B["npm run test:py"] --> B1["connector 5.1 (pinned)<br/>handshake, types, errors"]
+  B["npm run test:py"] --> B1["connector 4.8.1 (pinned)<br/>handshake, types, errors"]
   C["npm run test:dbt"] --> C1["dbt 1.12 + key-pair<br/>debug, run x2, seed x2, test"]
   C --> C2["verify.py<br/>results + wrong-key rejection"]
   C --> C3["stage_test.py<br/>PUT, LIST, COPY, GET, REMOVE"]
@@ -466,25 +466,13 @@ the exit trap only stops a process the runner started.
   there is no user, role or privilege model, and no TLS.
 - In memory by default: data lives for the process lifetime unless
   `SNOWTEST_DATA_DIR` is set (`setup.py` and `compose.yaml` set it).
-- Several `;`-separated statements in one request are not split: DuckDB runs
-  them all and returns one result; routing follows the first statement.
-- Connector `execute_async` + `get_results_from_sfqid` is not implemented. The
-  SQL API v2 async path (`?async=true`, then `GET /api/v2/statements/{handle}`)
-  is, and is tested.
-- No `COPY INTO @stage` (unload), no user (`@~`) or table (`@%table`) stages.
-- No UDFs, stored procedures, tasks, streams, dynamic tables, replication,
-  Snowpark, Snowpipe Streaming, `PUT`/`GET` encryption.
 - Single result partition; JSON only (no Arrow).
-- `GRANT`/`REVOKE` are recorded, not enforced: `SHOW GRANTS` reports what was
-  said, and every role can still do everything. Ownership never changes hands,
-  and a rename (`RENAME TO`, `SWAP WITH`) leaves grants under the old name.
-- `LATERAL FLATTEN` is a `json_each` projection: `recursive => TRUE` is refused
-  rather than approximated.
-- `CREATE FILE FORMAT` stores `TYPE` and its options for `SHOW`/`DESCRIBE` and
-  never applies them: `COPY INTO` reads its own option list. Formats are in
-  memory, like roles, so a restart forgets them.
-- No ODBC.
-- Warehouse "behaviour" is metadata: no queues, sizing or cost.
+- No replication: there is no second account or region to replicate to.
+
+Everything a statement can hit, whether a refused statement, a partial type or a
+gap in a function, is on the **Not supported** tab of `/operations`, which is
+generated from `src/operations.ts`. This list stops at the limits that have no
+statement to hang on.
 
 ---
 

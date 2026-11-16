@@ -9,6 +9,25 @@ permissions:
   contents: read
 
 jobs:
+  versions:
+    # The one place the pinned versions are read, so a bump in versions.json
+    # reaches the jobs below instead of being copied into each of them.
+    name: resolve versions
+    runs-on: ubuntu-latest
+    outputs:
+      connector: ${{ steps.read.outputs.connector }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: read
+        run: |
+          set -eu
+          connector=$(node -p "require('./versions.json').connector")
+          echo "connector ${connector}"
+          echo "connector=${connector}" >> "$GITHUB_OUTPUT"
+
   node:
     name: node ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -21,31 +40,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
 
   connector:
-    # 4.x replays a result through RESULT_SCAN; 5.x fetches /queries/{id}/result.
-    # Both paths are supported, so both are tested against their own Python.
-    name: connector ${{ matrix.connector }} on py${{ matrix.python }}
+    # The connector version comes from versions.json, resolved by the job above.
+    # Python versions are a matrix of their own, because they test the interpreter
+    # rather than the connector.
+    name: connector ${{ needs.versions.outputs.connector }} on py${{ matrix.python }}
+    needs: versions
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - connector: '4.8.1'
-            python: '3.12'
-          - connector: '5.1.0'
-            python: '3.14'
+        python: ['3.12', '3.14']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - uses: actions/setup-python@v5
         with:
@@ -53,7 +70,7 @@ jobs:
       - run: npm ci
       - run: npm run test:py
         env:
-          SNOWTEST_CONNECTOR: snowflake-connector-python==${{ matrix.connector }}
+          SNOWTEST_CONNECTOR: ${{ needs.versions.outputs.connector }}
 
   dbt:
     name: dbt suite
@@ -63,7 +80,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci
       - name: Ensure python3-venv and openssl are available

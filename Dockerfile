@@ -7,7 +7,7 @@
 # (glibc) because @duckdb/node-api ships prebuilt glibc binaries; musl/Alpine
 # would need a toolchain for no benefit here.
 
-FROM node:22-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ COPY src ./src
 RUN npm run build
 
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 
 ENV NODE_ENV=production \
     SNOWTEST_HOST=0.0.0.0 \
