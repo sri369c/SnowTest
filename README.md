@@ -47,5 +47,6 @@ curl -s -X POST 'http://localhost:3030/api/v2/statements' \
 
 Everything else — every supported statement, every flag, every known gap — is on
 the running server itself: `/operations`, `/configuration`, `/troubleshooting`.
+`/self-test` runs a set of checks against the instance it is served from.
 
 MIT, see [LICENSE](LICENSE).

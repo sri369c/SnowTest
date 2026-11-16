@@ -89,6 +89,7 @@ src/protocol.ts    response envelopes (driver vs SQL API v2)
 src/home.ts        landing page at / (connect, live catalog state, query timings, clear data)
 src/operations.ts  supported-operations reference at /operations, from data
 src/usage.ts       /configuration and /troubleshooting pages
+src/selfcheck.ts   /self-test: checks run through the server's own HTTP surface
 src/browse.ts      catalog browser at /browse
 src/page.ts        shared HTML shell and stylesheet
 src/stage.ts       stage directories on disk (PUT/GET/LIST/COPY INTO backing)

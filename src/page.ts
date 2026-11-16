@@ -174,13 +174,14 @@ const STYLES = `
   }
 `;
 
-export type NavKey = 'home' | 'operations' | 'configuration' | 'troubleshooting';
+export type NavKey = 'home' | 'operations' | 'configuration' | 'troubleshooting' | 'self-test';
 
 const NAV: Array<[NavKey, string, string]> = [
   ['home', '/', 'Home'],
   ['operations', '/operations', 'Operations'],
   ['configuration', '/configuration', 'Configuration'],
   ['troubleshooting', '/troubleshooting', 'Troubleshooting'],
+  ['self-test', '/self-test', 'Self Test'],
 ];
 
 export interface TabItem {

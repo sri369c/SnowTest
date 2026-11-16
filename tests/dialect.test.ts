@@ -46,6 +46,37 @@ describe('function translation', () => {
   });
 });
 
+describe('rewrites with no coverage elsewhere', () => {
+  it('maps the boolean aggregates onto DuckDB', () => {
+    expect(run('SELECT BOOLOR_AGG(flag)')).toBe('SELECT BOOL_OR(FLAG)');
+    expect(run('SELECT BOOLAND_AGG(flag)')).toBe('SELECT BOOL_AND(FLAG)');
+  });
+
+  it('compares NULLs as equal in EQUAL_NULL', () => {
+    expect(run('SELECT EQUAL_NULL(a, b)')).toBe('SELECT (A IS NOT DISTINCT FROM B)');
+  });
+
+  it('builds arrays and JSON values', () => {
+    expect(run('SELECT ARRAY_CONSTRUCT(1, 2)')).toBe('SELECT LIST_VALUE(1, 2)');
+    expect(run('SELECT TO_JSON(x)')).toBe('SELECT CAST(X AS JSON)');
+  });
+
+  it('substitutes account and version alongside the rest of the session context', () => {
+    const scoped = { ...ctx, account: 'ACCT01', version: '9.9.9' };
+    expect(rewrite('SELECT CURRENT_USER(), CURRENT_ACCOUNT(), CURRENT_VERSION()', scoped, [])).toBe(
+      "SELECT 'TEST', 'ACCT01', '9.9.9'",
+    );
+  });
+
+  it('drops the table properties DuckDB does not implement', () => {
+    const out = run(
+      'CREATE TABLE t (a INT) DATA_RETENTION_TIME_IN_DAYS = 1 CHANGE_TRACKING = TRUE ENABLE_SCHEMA_EVOLUTION = FALSE',
+    );
+    expect(out).not.toMatch(/DATA_RETENTION|CHANGE_TRACKING|SCHEMA_EVOLUTION/);
+    expect(out).toMatch(/^CREATE TABLE T \(A INT\)\s*$/);
+  });
+});
+
 describe('clock functions', () => {
   it('accepts the call forms', () => {
     expect(run('SELECT CURRENT_TIMESTAMP(), LOCALTIMESTAMP(), CURRENT_DATE()')).toBe(
