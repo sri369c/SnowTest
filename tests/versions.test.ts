@@ -157,11 +157,11 @@ describe('node is one version everywhere', () => {
   // runtime, not three numbers with three owners that nobody compares.
   const MAJOR = '24';
 
-  it('builds both image stages on it', () => {
-    const dockerfile = read('Dockerfile');
-    const stages = dockerfile.match(/^FROM node:(\d+)/gm) ?? [];
-    expect(stages.length).toBe(2);
-    for (const stage of stages) expect(stage).toContain(`node:${MAJOR}`);
+  it('builds every image stage on it', () => {
+    const stages = read('Dockerfile').match(/^FROM .*/gm) ?? [];
+    expect(stages.length, 'the Dockerfile has no FROM line').toBeGreaterThan(0);
+    const pinned = new RegExp(`^FROM node:${MAJOR}\\b`);
+    for (const stage of stages) expect(stage).toMatch(pinned);
   });
 
   it('runs every CI job on it', () => {
@@ -169,7 +169,7 @@ describe('node is one version everywhere', () => {
       .split(/\r?\n/)
       .filter((line) => line.includes('node-version:'));
     expect(lines.length).toBeGreaterThan(0);
-    for (const line of lines) expect(line).toContain(MAJOR);
+    for (const line of lines) expect(line).toContain(`node-version: ${MAJOR}`);
   });
 
   it('declares it as the floor for a consumer', () => {
