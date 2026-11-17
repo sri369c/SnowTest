@@ -35,7 +35,13 @@ import {
   renderSchema,
   type BrowseTable,
 } from './browse.js';
-import { renderHome, type HomeDatabaseState, type HomeQueryState } from './home.js';
+import {
+  renderHome,
+  type HomeDatabaseState,
+  type HomeFilterState,
+  type HomeQueryState,
+  type HomeVolumeState,
+} from './home.js';
 import { renderOperations } from './operations.js';
 import { renderSelfTest, runSelfChecks } from './selfcheck.js';
 import { renderConfiguration, renderTroubleshooting } from './usage.js';
@@ -362,6 +368,32 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     return c.text('Internal Server Error', 500);
   });
 
+  /** Chart windows the page offers, in hours. Anything else falls back to a day. */
+  const WINDOW_HOURS = [6, 24, 168];
+
+  const readWindow = (raw: string | undefined): number => {
+    const hours = Number(raw);
+    return WINDOW_HOURS.includes(hours) ? hours : 24;
+  };
+
+  /** `from`/`to` as instants: unparseable or inverted values are simply not a filter. */
+  const readRange = (
+    from: string | undefined,
+    to: string | undefined,
+  ): { from: Date; to: Date } | null => {
+    if (!from || !to) return null;
+    const start = new Date(from);
+    const end = new Date(to);
+    if (
+      !Number.isFinite(start.getTime()) ||
+      !Number.isFinite(end.getTime()) ||
+      start.getTime() >= end.getTime()
+    ) {
+      return null;
+    }
+    return { from: start, to: end };
+  };
+
   // ---------------------------------------------------------------------------
   // Landing page: what this process is, and how to point a client at it.
   // ---------------------------------------------------------------------------
@@ -390,14 +422,32 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
     // Timings are a convenience: a history table that cannot be read must not
     // take the landing page down with it.
+    const windowHours = readWindow(c.req.query('window'));
+    const range = readRange(c.req.query('from'), c.req.query('to'));
     let queries: HomeQueryState[] = [];
     let queryCount = 0;
+    let volume: HomeVolumeState | null = null;
+    let filter: HomeFilterState | null = null;
     try {
-      queries = await engine.queryHistory(PREVIEW_LIMIT);
       queryCount = await engine.queryHistoryCount();
+      volume = await engine.queryVolume(windowHours);
+      if (range) {
+        queries = await engine.queryHistoryRange(range.from, range.to, PREVIEW_LIMIT);
+        // The hour's own count, not the page's: a busy hour holds more
+        // statements than the table below shows.
+        const hour = volume.buckets.find(
+          (bucket) =>
+            bucket.start.getTime() === Math.floor(range.from.getTime() / 3_600_000) * 3_600_000,
+        );
+        filter = { ...range, statements: hour?.statements ?? queries.length };
+      } else {
+        queries = await engine.queryHistory(PREVIEW_LIMIT);
+      }
     } catch {
       queries = [];
       queryCount = 0;
+      volume = null;
+      filter = null;
     }
 
     // The Clear Data tab redirects back here with what just happened, so the
@@ -430,6 +480,9 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         stages: catalog.stages.size,
         queries,
         queryCount,
+        volume,
+        filter,
+        windowHours,
         notice,
         sessions: sessions.all().map((session) => ({
           user: session.user,

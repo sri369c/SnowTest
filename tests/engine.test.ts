@@ -50,7 +50,7 @@ describe('engine behaviour (in memory)', () => {
     server = await createServer({ dataDir: null });
   });
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('redirects the old /usage page to /configuration', async () => {
@@ -469,7 +469,7 @@ describe('quoted default database', () => {
     server = await createServer({ dataDir: null, defaultDatabase: '"devDb"' });
   });
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('keeps its case on the SQL API and login paths', async () => {
@@ -491,7 +491,7 @@ describe('login with CLIENT_VALIDATE_DEFAULT_PARAMETERS', () => {
     server = await createServer({ dataDir: null });
   });
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   async function login(fields: Record<string, unknown>): Promise<{ success: boolean; code?: string; message?: string }> {

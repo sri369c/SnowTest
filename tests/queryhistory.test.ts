@@ -33,7 +33,7 @@ describe('query history (in memory)', () => {
     server = await createServer({ dataDir: null });
   });
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('notes a successful statement where Snowflake keeps account usage', async () => {
@@ -125,6 +125,77 @@ describe('query history (persisted)', () => {
       await second.close();
     } finally {
       await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('timings chart and the hour filter', () => {
+  let server: SnowtestServer;
+
+  const page = async (path: string): Promise<string> => (await server.app.request(path)).text();
+  /** One rect per bucket; the count is what the window controls. */
+  const buckets = (html: string): number => (html.match(/class="hit"/g) ?? []).length;
+
+  beforeAll(async () => {
+    server = await createServer({ dataDir: null });
+  });
+  afterAll(async () => {
+    await server?.close();
+  });
+
+  it('draws one bucket for every hour in the window', async () => {
+    expect((await sql(server, 'SELECT 1 AS CHART_MARKER')).status).toBe(200);
+
+    const html = await page('/');
+    expect(buckets(html)).toBe(24);
+    expect(html).toContain('Statements per hour');
+    expect(html).toContain('1 in the window');
+  });
+
+  it('marks days, not hours, once the window runs past one', async () => {
+    const week = await page('/?window=168');
+    // One candidate per bucket; the browser keeps the ones that start a local day.
+    expect((week.match(/class="daymark"/g) ?? []).length).toBe(168);
+    expect((await page('/?window=24')).includes('class="daymark"')).toBe(false);
+  });
+
+  it('falls back to a day for a window it does not offer', async () => {
+    expect(buckets(await page('/?window=999'))).toBe(24);
+    expect(buckets(await page('/?window=6'))).toBe(6);
+    expect(buckets(await page('/?window=168'))).toBe(168);
+  });
+
+  it('narrows the table to the hour that was clicked', async () => {
+    const from = new Date();
+    from.setMinutes(0, 0, 0);
+    const to = new Date(from.getTime() + 3_600_000);
+
+    const html = await page(`/?window=24&from=${from.toISOString()}&to=${to.toISOString()}`);
+    expect(html).toContain('CHART_MARKER');
+    expect(html).toContain('class="chip"');
+  });
+
+  it('says the hour is empty instead of showing an older statement', async () => {
+    const html = await page('/?from=2001-01-01T00:00:00.000Z&to=2001-01-01T01:00:00.000Z');
+    expect(html).toContain('No statements in this hour.');
+    expect(html).not.toContain('CHART_MARKER');
+    expect(html).toContain('class="chip"');
+  });
+
+  it('ignores a range it cannot read', async () => {
+    const html = await page('/?from=yesterday&to=tomorrow');
+    expect(html).toContain('CHART_MARKER');
+    expect(html).not.toContain('class="chip"');
+  });
+
+  it('draws no line when nothing is timed yet', async () => {
+    const empty = await createServer({ dataDir: null });
+    try {
+      const html = await (await empty.app.request('/')).text();
+      expect(buckets(html)).toBe(0);
+      expect(html).toContain('Nothing in the last 24 hours is timed yet');
+    } finally {
+      await empty.close();
     }
   });
 });

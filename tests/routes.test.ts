@@ -61,7 +61,7 @@ describe('control-plane probes', () => {
   });
 
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('reports both versions on /_snowtest/health', async () => {
@@ -109,7 +109,7 @@ describe('token renewal', () => {
   });
 
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('renews over GET and retires the old token', async () => {
@@ -158,7 +158,7 @@ describe('query monitoring and cancellation', () => {
   });
 
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('lists a finished query under /monitoring/queries', async () => {
@@ -242,7 +242,7 @@ describe('unmatched paths', () => {
   });
 
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('answers a JSON 404 that names the path', async () => {

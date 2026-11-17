@@ -162,6 +162,51 @@ const STYLES = `
   .scroller { overflow-x: auto; margin: 1.25rem 0; }
   .scroller table { min-width: 100%; }
   .scroller td { white-space: nowrap; }
+
+  /* Vertical cap for the data tables: twelve rows, then a scrollbar. The header
+     sticks, so a scrolled table never loses its column names. */
+  .vscroll { max-height: 22rem; overflow-y: auto; border: 1px solid #d0d7de; border-radius: 8px; }
+  .vscroll thead th { position: sticky; top: 0; z-index: 1; background: #fff; }
+  .vscroll .empty { color: #57606a; font-style: italic; padding: 1.25rem .6rem; }
+  @media (prefers-color-scheme: dark) { .vscroll thead th { background: #0d1117; } }
+
+  /* The timings chart. Inline SVG, so each part is one class and no library. */
+  .charthead { display: flex; align-items: baseline; justify-content: space-between;
+               gap: 1rem; flex-wrap: wrap; }
+  /* Landing on the chart from a bar: not flush against the top of the window. */
+  #timings-chart { scroll-margin-top: .75rem; }
+  .chartwrap { position: relative; margin: .5rem 0 .25rem; }
+  .chartwrap svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chartwrap .hit { fill: transparent; cursor: pointer; }
+  .chartwrap .hit:hover { fill: rgba(9, 105, 218, .08); }
+  .chartwrap .hit:focus-visible { fill: rgba(9, 105, 218, .08); outline: 1px solid #0969da; }
+  .chartwrap .grid { stroke: currentColor; stroke-opacity: .12; }
+  .axis { fill: #57606a; font-size: 10px; font-family: inherit; }
+  .chartline { fill: none; stroke: #0969da; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chartarea { fill: #0969da; fill-opacity: .12; }
+  .chartdot { fill: #0969da; }
+  .band { fill: rgba(9, 105, 218, .14); pointer-events: none; }
+  .dayline { stroke: currentColor; stroke-opacity: .22; stroke-dasharray: 2 3; }
+  .tooltip { position: absolute; transform: translate(-50%, -100%); pointer-events: none;
+             background: #1b1f24; color: #fff; font-size: .78rem; line-height: 1.35;
+             padding: .3rem .5rem; border-radius: 6px; white-space: nowrap; z-index: 2; }
+  .chip { display: inline-flex; align-items: center; gap: .5rem; font-size: .85rem;
+          border: 1px solid #0969da; color: #0969da; border-radius: 999px;
+          padding: .1rem .3rem .1rem .7rem; margin: 0 0 .75rem; }
+  .chip a { color: inherit; text-decoration: none; padding: .15rem .35rem; }
+  /* An author display rule beats the UA rule for [hidden]; say it again. */
+  .chip[hidden] { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .chartline { stroke: #6cb6ff; }
+    .chartarea { fill: #6cb6ff; }
+    .chartdot { fill: #6cb6ff; }
+    .axis { fill: #8b949e; }
+    .tooltip { background: #30363d; }
+    .vscroll { border-color: #30363d; }
+    .vscroll .empty { color: #8b949e; }
+    .chip { border-color: #6cb6ff; color: #6cb6ff; }
+    .chartwrap .hit:focus-visible, .chartwrap .hit:hover { fill: rgba(108, 182, 255, .12); outline-color: #6cb6ff; }
+  }
   .pill { display: inline-block; white-space: nowrap; font-size: .72rem; line-height: 1.5;
           padding: 0 .45rem; border: 1px solid; border-radius: 999px; }
   .pill-supported { color: #1a7f37; border-color: #1a7f37; background: #eaf6ec; }
