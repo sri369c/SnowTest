@@ -93,6 +93,27 @@ const HISTORY_SEQUENCE = 'QUERY_HISTORY_SEQ';
 /** Not `.duckdb`: DataDir restores every `.duckdb` file as a user database, and this is not one. */
 const HISTORY_FILE = 'query_history.db';
 
+/** The columns the pages read, in the order `toHistoryEntry` expects them. */
+const HISTORY_COLUMNS = `SELECT query_text, start_time, total_elapsed_time, rows_produced, execution_status, user_name
+       FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}`;
+
+const HOUR_MS = 3_600_000;
+
+/** One page of statements is a preview; a caller asking for a million gets a cap. */
+const rowLimit = (limit: number): number => Math.max(1, Math.min(1_000, Math.trunc(limit)));
+
+/** A history row as the pages use it; `start_time` arrives as a Date or as text. */
+function toHistoryEntry(row: unknown[]): QueryHistoryEntry {
+  return {
+    queryText: String(row[0]),
+    startedAt: row[1] instanceof Date ? row[1] : new Date(String(row[1])),
+    elapsedMs: Number(row[2] ?? 0),
+    rowsProduced: Number(row[3] ?? 0),
+    status: String(row[4] ?? ''),
+    user: String(row[5] ?? ''),
+  };
+}
+
 /** One statement as the landing page shows it. */
 export interface QueryHistoryEntry {
   queryText: string;
@@ -101,6 +122,22 @@ export interface QueryHistoryEntry {
   rowsProduced: number;
   status: string;
   user: string;
+}
+
+/** One hour of the timings chart: how many statements started in it. */
+export interface QueryVolumeBucket {
+  /** Start of the hour, UTC. */
+  start: Date;
+  statements: number;
+}
+
+/** Statement counts across a window, for the line above the timings table. */
+export interface QueryVolume {
+  from: Date;
+  to: Date;
+  /** Statements inside the window — not the count the whole table holds. */
+  total: number;
+  buckets: QueryVolumeBucket[];
 }
 
 /** One statement, as the history table records it. Times are wall clock, UTC. */
@@ -239,18 +276,54 @@ export class Engine {
   /** Newest statements first, for the landing page. */
   async queryHistory(limit = 15): Promise<QueryHistoryEntry[]> {
     const rows = await this.queryOnAdmin(
-      `SELECT query_text, start_time, total_elapsed_time, rows_produced, execution_status, user_name
-       FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}
-       ORDER BY query_id DESC LIMIT ${Math.max(1, Math.trunc(limit))}`,
+      `${HISTORY_COLUMNS}
+       ORDER BY query_id DESC LIMIT ${rowLimit(limit)}`,
     );
-    return rows.map((row) => ({
-      queryText: String(row[0]),
-      startedAt: row[1] instanceof Date ? row[1] : new Date(String(row[1])),
-      elapsedMs: Number(row[2] ?? 0),
-      rowsProduced: Number(row[3] ?? 0),
-      status: String(row[4] ?? ''),
-      user: String(row[5] ?? ''),
-    }));
+    return rows.map(toHistoryEntry);
+  }
+
+  /** The statements that started inside `[from, to)`, newest first. */
+  async queryHistoryRange(from: Date, to: Date, limit = 50): Promise<QueryHistoryEntry[]> {
+    const rows = await this.queryOnAdmin(
+      `${HISTORY_COLUMNS}
+       WHERE start_time >= TIMESTAMP '${utcStamp(from)}' AND start_time < TIMESTAMP '${utcStamp(to)}'
+       ORDER BY query_id DESC LIMIT ${rowLimit(limit)}`,
+    );
+    return rows.map(toHistoryEntry);
+  }
+
+  /**
+   * Statement counts per hour over the last `hours` hours, ending with the hour
+   * in progress. An hour with nothing in it comes back as a zero rather than
+   * being skipped: the chart draws a line across the whole window, and a quiet
+   * hour is part of the shape it shows.
+   */
+  async queryVolume(hours = 24, now = new Date()): Promise<QueryVolume> {
+    const span = Math.max(1, Math.min(24 * 30, Math.trunc(hours)));
+    // Whole hours, so a bucket never straddles the minute the page was loaded.
+    const to = new Date(Math.floor(now.getTime() / HOUR_MS) * HOUR_MS + HOUR_MS);
+    const from = new Date(to.getTime() - span * HOUR_MS);
+    // epoch_ms keeps the bucketing in UTC: a TIMESTAMP read back as a Date would
+    // depend on the host's zone, and the grid below is built from epoch values.
+    const rows = await this.queryOnAdmin(
+      `SELECT CAST(epoch_ms(date_trunc('hour', start_time)) AS BIGINT) AS bucket, count(*)
+       FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}
+       WHERE start_time >= TIMESTAMP '${utcStamp(from)}' AND start_time < TIMESTAMP '${utcStamp(to)}'
+       GROUP BY 1 ORDER BY 1`,
+    );
+    const counts = new Map<number, number>();
+    for (const row of rows) {
+      counts.set(Number(row[0]), Number(row[1] ?? 0));
+    }
+    const buckets: QueryVolumeBucket[] = [];
+    let total = 0;
+    for (let index = 0; index < span; index++) {
+      const start = new Date(from.getTime() + index * HOUR_MS);
+      const statements = counts.get(start.getTime()) ?? 0;
+      total += statements;
+      buckets.push({ start, statements });
+    }
+    return { from, to, total, buckets };
   }
 
   /** Empty the timings table, and say how many statements went. */

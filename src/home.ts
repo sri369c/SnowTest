@@ -46,6 +46,22 @@ export interface HomeQueryState {
   user: string;
 }
 
+/** Hourly statement counts behind the timings chart. */
+export interface HomeVolumeState {
+  from: Date;
+  to: Date;
+  total: number;
+  buckets: Array<{ start: Date; statements: number }>;
+}
+
+/** The hour the timings table has been narrowed to. */
+export interface HomeFilterState {
+  from: Date;
+  to: Date;
+  /** Statements in that hour, even when the table below shows only the newest of them. */
+  statements: number;
+}
+
 export interface HomeState {
   databases: HomeDatabaseState[];
   warehouses: string[];
@@ -55,6 +71,12 @@ export interface HomeState {
   queries: HomeQueryState[];
   /** Statements in the timings table, not just the ones the page lists. */
   queryCount: number;
+  /** Hourly counts for the chart; null when the table could not be read. */
+  volume?: HomeVolumeState | null;
+  /** Set when a bar was clicked, so the table shows that hour only. */
+  filter?: HomeFilterState | null;
+  /** Hours the chart covers; the window links and the bucket width follow it. */
+  windowHours?: number;
   /** What a clear just did, carried across the reload that follows it. */
   notice?: { kind: 'timings' | 'reset' | 'seed'; text: string } | null;
 }
@@ -88,12 +110,14 @@ const REFRESH_SCRIPT = `<script>
       button.classList.remove('err');
       button.disabled = true;
       try {
-        const response = await fetch('/', { cache: 'no-store' });
+        const response = await fetch(location.pathname + location.search, { cache: 'no-store' });
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
         const fresh = doc.getElementById(body);
         if (!fresh) throw new Error(body + ' missing from response');
         document.getElementById(body).replaceWith(fresh);
+        // The new copy is server time until the browser relabels it.
+        if (window.snowtestRelabel) window.snowtestRelabel();
         stamp();
       } catch (error) {
         button.classList.add('err');
@@ -104,6 +128,124 @@ const REFRESH_SCRIPT = `<script>
       }
     });
   }
+})();
+</script>`;
+
+// Hovering reads the count off the bar; a click follows the link the server built.
+// Delegated from the document, so a bar inside a refreshed `timings-body` works
+// without anything being re-bound.
+const CHART_SCRIPT = `<script>
+(() => {
+  const tooltip = () => document.getElementById('chart-tip');
+  const hide = () => { const node = tooltip(); if (node) node.hidden = true; };
+  const show = (hit) => {
+    const node = tooltip();
+    const svg = hit.ownerSVGElement;
+    if (!node || !svg) return;
+    const box = svg.getBoundingClientRect();
+    const wrap = svg.parentElement.getBoundingClientRect();
+    const left = box.left - wrap.left + (Number(hit.dataset.cx) / Number(svg.dataset.width)) * box.width;
+    const top = box.top - wrap.top + (Number(hit.dataset.cy) / Number(svg.dataset.height)) * box.height;
+    node.textContent = hit.dataset.label + ' · ' + hit.dataset.count
+      + (hit.dataset.count === '1' ? ' statement' : ' statements');
+    node.style.left = Math.min(Math.max(left, 68), wrap.width - 68) + 'px';
+    node.style.top = (top - 6) + 'px';
+    node.hidden = false;
+  };
+  const bar = (event) => (event.target instanceof Element ? event.target.closest('.hit') : null);
+  document.addEventListener('mouseover', (event) => { const hit = bar(event); if (hit) show(hit); });
+  document.addEventListener('mouseout', (event) => { if (bar(event)) hide(); });
+  document.addEventListener('focusin', (event) => { const hit = bar(event); if (hit) show(hit); });
+  document.addEventListener('focusout', hide);
+  document.addEventListener('click', (event) => {
+    const hit = bar(event);
+    if (hit) location.assign(hit.dataset.href);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const hit = bar(event);
+    if (!hit) return;
+    event.preventDefault();
+    location.assign(hit.dataset.href);
+  });
+})();
+</script>`;
+
+// The page is rendered on the server, which knows its own zone and not the
+// reader's, so every time it prints carries the instant it stands for. This
+// relabels them in the browser's zone — table cells in full, chart ticks and the
+// hour filter as `HH:MM` — and is exported so a refreshed body gets the same
+// treatment. Nothing about the data depends on it: a filter is an instant, so
+// clicking a bar means the same hour whatever the label says.
+const TIMES_SCRIPT = `<script>
+(() => {
+  const pad = (n) => String(n).padStart(2, '0');
+  const hourOf = (iso) => { const at = new Date(iso); return pad(at.getHours()) + ':' + pad(at.getMinutes()); };
+  const fullOf = (iso) => {
+    const at = new Date(iso);
+    let zone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    try {
+      zone = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
+        .formatToParts(at).find((part) => part.type === 'timeZoneName')?.value || zone;
+    } catch {}
+    return at.getFullYear() + '-' + pad(at.getMonth() + 1) + '-' + pad(at.getDate())
+      + ' ' + pad(at.getHours()) + ':' + pad(at.getMinutes()) + ':' + pad(at.getSeconds()) + ' ' + zone;
+  };
+  const relabel = () => {
+    for (const node of document.querySelectorAll('[data-at]')) node.textContent = fullOf(node.dataset.at);
+    for (const node of document.querySelectorAll('[data-hour-at]')) node.textContent = hourOf(node.dataset.hourAt);
+    for (const node of document.querySelectorAll('[data-span-from]')) {
+      node.textContent = hourOf(node.dataset.spanFrom) + '–' + hourOf(node.dataset.spanTo);
+    }
+    for (const node of document.querySelectorAll('.hit[data-from]')) {
+      const label = hourOf(node.dataset.from) + '–' + hourOf(node.dataset.to);
+      node.dataset.label = label;
+      node.setAttribute('aria-label', label + ': ' + node.dataset.count + ' statement(s)');
+    }
+    // One divider per local day: the first bucket whose date differs from the one
+    // before it. Labels are thinned rather than the dividers: a window that opens
+    // an hour before midnight puts two dates a few pixels apart, and the later day
+    // is the one worth naming.
+    const marks = [...document.querySelectorAll('.daymark')];
+    if (marks.length > 0) {
+      const dayFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+      const gap = 42; // viewBox units a date label needs to itself
+      const openingDay = new Date(marks[0].dataset.dayAt).toDateString();
+      const openingHours = marks.filter(
+        (mark) => new Date(mark.dataset.dayAt).toDateString() === openingDay,
+      ).length;
+      let previousDay = null;
+      let lastX = -Infinity;
+      for (const mark of marks) {
+        const label = mark.querySelector('text');
+        const line = mark.querySelector('line');
+        if (!label || !line) continue;
+        const at = new Date(mark.dataset.dayAt);
+        const day = at.toDateString();
+        const first = day !== previousDay;
+        previousDay = day;
+        if (!first) {
+          mark.style.display = 'none';
+          continue;
+        }
+        // A sliver of an opening day is where the window starts, not a day name.
+        if (day === openingDay && openingHours < 12) {
+          mark.style.display = 'none';
+          continue;
+        }
+        mark.style.display = '';
+        label.textContent = dayFormat.format(at);
+        const atX = Number(line.getAttribute('x1'));
+        if (atX - lastX < gap) {
+          label.style.display = 'none';
+          continue;
+        }
+        lastX = atX;
+      }
+    }
+  };
+  window.snowtestRelabel = relabel;
+  relabel();
 })();
 </script>`;
 
@@ -244,6 +386,161 @@ function shorten(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
+const HOUR_MS = 3_600_000;
+
+/** Windows the chart offers, in hours, with the label its link carries. */
+const CHART_WINDOWS: Array<[number, string]> = [
+  [6, '6h'],
+  [24, '24h'],
+  [168, '7d'],
+];
+
+/** `HH:00`, in the same server time the timings table prints. */
+function formatHour(date: Date): string {
+  return `${pad(date.getHours())}:00`;
+}
+
+const CHART = { width: 720, height: 105, left: 30, right: 8, top: 8, bottom: 22 } as const;
+
+/**
+ * The hour-of-requests line above the timings table.
+ *
+ * Inline SVG built here, so the page carries no chart library, and no client
+ * state either: the selected hour is a URL parameter and every bar is a link.
+ * Hovering reads the count off the bar's data attributes; clicking follows the
+ * link — see CHART_SCRIPT. The buckets arrive whole, empty hours included, so
+ * the line runs across the window instead of jumping the quiet stretches.
+ */
+function renderVolumeChart(
+  volume: HomeVolumeState,
+  windowHours: number,
+  selected: HomeFilterState | null,
+): string {
+  const links = CHART_WINDOWS.map(([hours, label]) =>
+    hours === windowHours ? `<strong>${label}</strong>` : `<a href="/?window=${hours}#timings">${label}</a>`,
+  ).join(' <span class="muted">·</span> ');
+  const head = `<div class="charthead">
+    <span><strong>Statements per hour</strong> <span class="muted">&mdash; last ${windowHours} hours, ${volume.total} in the window</span></span>
+    <span class="muted">${links}</span>
+  </div>`;
+
+  // Nothing timed yet: a flat line at zero would look like a quiet day, not an
+  // empty table, so say which one it is.
+  if (volume.total === 0) {
+    return `<div class="card">
+${head}
+<p class="muted">Nothing in the last ${windowHours} hours is timed yet, so there is no line to draw. Run a statement and it appears.</p>
+</div>`;
+  }
+
+  const { width, height, left, right, top, bottom } = CHART;
+  const count = volume.buckets.length;
+  const step = (width - left - right) / count;
+  const peak = Math.max(1, ...volume.buckets.map((bucket) => bucket.statements));
+  const x = (index: number): number => left + index * step + step / 2;
+  const y = (value: number): number => top + (height - top - bottom) * (1 - value / peak);
+  const points = volume.buckets.map((bucket, index) => `${x(index).toFixed(1)},${y(bucket.statements).toFixed(1)}`);
+  const area = `M${x(0).toFixed(1)},${y(0).toFixed(1)} L${points.join(' L')} L${x(count - 1).toFixed(1)},${y(0).toFixed(1)} Z`;
+
+  const grid = [0, 0.5, 1]
+    .map((fraction) => {
+      const at = y(peak * fraction).toFixed(1);
+      return `<line class="grid" x1="${left}" x2="${width - right}" y1="${at}" y2="${at}" />
+        <text class="axis" x="${left - 6}" y="${Number(at) + 3}" text-anchor="end">${Math.round(peak * fraction)}</text>`;
+    })
+    .join('');
+
+  const selectedIndex = selected
+    ? volume.buckets.findIndex(
+        (bucket) => bucket.start.getTime() === Math.floor(selected.from.getTime() / HOUR_MS) * HOUR_MS,
+      )
+    : -1;
+
+  const band =
+    selectedIndex >= 0
+      ? `<rect class="band" x="${(x(selectedIndex) - step / 2).toFixed(1)}" y="${top}" width="${step.toFixed(1)}" height="${height - top - bottom}" />`
+      : '';
+
+  // A dot per hour is a shape; a dot per hour across a week is a smear.
+  const dots =
+    count <= 48
+      ? volume.buckets
+          .map(
+            (bucket, index) =>
+              `<circle class="chartdot" cx="${x(index).toFixed(1)}" cy="${y(bucket.statements).toFixed(1)}" r="${index === selectedIndex ? 4 : 2.5}" />`,
+          )
+          .join('')
+      : '';
+
+  // Past a day, hours stop being the unit that matters: every bucket still gets
+  // a candidate divider, and the browser keeps the ones that begin a local day.
+  // The server cannot know the reader's zone, so it marks its own days and the
+  // script corrects them; a :30 offset can put a boundary half a bucket out.
+  const multiDay = windowHours > 24;
+  const labelEvery = Math.max(1, Math.round(count / 6));
+  const ticks = multiDay
+    ? ''
+    : volume.buckets
+        .map((bucket, index) => {
+          const isLast = index === count - 1;
+          if (index % labelEvery !== 0 && !isLast) return '';
+          const anchor = isLast && index % labelEvery !== 0 ? 'end' : 'middle';
+          return `<text class="axis" data-hour-at="${bucket.start.toISOString()}" x="${x(index).toFixed(1)}" y="${height - 6}" text-anchor="${anchor}">${formatHour(bucket.start)}</text>`;
+        })
+        .join('');
+  const dayMarks = multiDay
+    ? volume.buckets
+        .map((bucket, index) => {
+          const isLast = index === count - 1;
+          const left = (x(index) - step / 2).toFixed(1);
+          const textX = isLast ? (x(index) - 4).toFixed(1) : (x(index) - step / 2 + 4).toFixed(1);
+          // `data-day-at`, not `data-hour-at`: the hour loop rewrites the text of
+          // everything carrying that attribute, which would wipe this group's children.
+          return `<g class="daymark" data-day-at="${bucket.start.toISOString()}" style="display:none">
+          <line class="dayline" x1="${left}" x2="${left}" y1="${top}" y2="${height - bottom}" />
+          <text class="axis" x="${textX}" y="${height - 6}" text-anchor="${isLast ? 'end' : 'start'}"></text>
+        </g>`;
+        })
+        .join('')
+    : '';
+
+  const hits = volume.buckets
+    .map((bucket, index) => {
+      const end = new Date(bucket.start.getTime() + HOUR_MS);
+      const label = `${formatHour(bucket.start)}–${formatHour(end)}`;
+      // Clicking the hour that is already selected is how the filter is dropped.
+      const href =
+        index === selectedIndex
+          ? `/?window=${windowHours}#timings`
+          : `/?window=${windowHours}&from=${encodeURIComponent(bucket.start.toISOString())}&to=${encodeURIComponent(end.toISOString())}#timings`;
+      return `<rect class="hit" x="${(x(index) - step / 2).toFixed(1)}" y="${top}" width="${step.toFixed(1)}" height="${height - top - bottom}" tabindex="0" role="link"
+          data-href="${href}" data-cx="${x(index).toFixed(1)}" data-cy="${y(bucket.statements).toFixed(1)}"
+          data-label="${label}" data-count="${bucket.statements}"
+          data-from="${bucket.start.toISOString()}" data-to="${end.toISOString()}"
+          aria-label="${label}: ${bucket.statements} statement(s)" />`;
+    })
+    .join('');
+
+  return `<div class="card">
+${head}
+<div class="chartwrap">
+<div class="tooltip" id="chart-tip" hidden></div>
+<svg viewBox="0 0 ${width} ${height}" data-width="${width}" data-height="${height}" role="img"
+     aria-label="Statements per hour over the last ${windowHours} hours">
+${grid}
+${band}
+<path class="chartarea" d="${area}" />
+<polyline class="chartline" points="${points.join(' ')}" />
+${dots}
+${dayMarks}
+${ticks}
+${hits}
+</svg>
+</div>
+<p class="muted">Hover an hour for its count; click one to narrow the table below. Click it again, or the × on the chip, to go back. Times here follow your browser's zone.</p>
+</div>`;
+}
+
 export function renderHome(
   config: SnowtestConfig,
   origin: string,
@@ -294,7 +591,7 @@ export function renderHome(
     state.queries
       .map(
         (query) =>
-          `    <tr><td>${escapeHtml(formatServerTime(query.startedAt))}</td><td><code>${escapeHtml(query.user)}</code></td><td class="sql" title="${escapeHtml(query.queryText)}">${escapeHtml(shorten(query.queryText, 90))}</td><td class="num">${escapeHtml(formatElapsed(query.elapsedMs))}</td><td class="num">${query.rowsProduced}</td><td>${escapeHtml(query.status)}</td></tr>`,
+          `    <tr><td data-at="${query.startedAt.toISOString()}">${escapeHtml(formatServerTime(query.startedAt))}</td><td><code>${escapeHtml(query.user)}</code></td><td class="sql" title="${escapeHtml(query.queryText)}">${escapeHtml(shorten(query.queryText, 90))}</td><td class="num">${escapeHtml(formatElapsed(query.elapsedMs))}</td><td class="num">${query.rowsProduced}</td><td>${escapeHtml(query.status)}</td></tr>`,
       )
       .join('\n') || '    <tr><td colspan="6">No statements recorded yet.</td></tr>';
   const surfaceRows = LANDING_SURFACES.map(
@@ -467,10 +764,23 @@ ${surfaceRows}
 
   // The count is the whole table; the list underneath is only its latest page, so
   // say both numbers whenever they differ.
-  const timingsCount =
-    state.queries.length < state.queryCount
+  const windowHours = state.windowHours ?? 24;
+  const filter = state.filter ?? null;
+  const volume = state.volume ?? null;
+  const timingsCount = filter
+    ? `${filter.statements} statement(s) started between <span data-hour-at="${filter.from.toISOString()}">${escapeHtml(formatHour(filter.from))}</span> and <span data-hour-at="${filter.to.toISOString()}">${escapeHtml(formatHour(filter.to))}</span>; the latest ${state.queries.length} of them are below.`
+    : state.queries.length < state.queryCount
       ? `${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, the latest ${state.queries.length} below.`
       : `${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, all of them below.`;
+  const timingsRows =
+    state.queries.length > 0
+      ? queryRows
+      : `    <tr><td colspan="6" class="empty">${filter ? 'No statements in this hour.' : 'No statements recorded yet.'}</td></tr>`;
+  // Only rendered while an hour is selected, so there is nothing to hide — and
+  // nothing that can stay on screen after the filter is cleared.
+  const chip = filter
+    ? `<div class="chip"><span data-span-from="${filter.from.toISOString()}" data-span-to="${filter.to.toISOString()}">${escapeHtml(formatHour(filter.from))}–${escapeHtml(formatHour(filter.to))}</span> &middot; ${filter.statements} statement(s)<a href="/?window=${windowHours}#timings" title="Clear the hour filter" aria-label="Clear the hour filter">×</a></div>`
+    : '';
 
   // `timings-body` is swapped in place by this tab's own refresh button.
   const timings = `<div class="livebar"><span class="muted" data-stamp aria-live="polite"></span><button type="button" class="refresh" data-refresh="timings-body" title="Refresh the query timings">${REFRESH_ICON}Refresh</button></div>
@@ -481,10 +791,18 @@ ${surfaceRows}
   Snowflake keeps it. It is a real table — query it from a client for anything
   older than this preview.
 </p>
+${volume ? renderVolumeChart(volume, windowHours, filter) : ''}
+${chip}
+<div class="vscroll">
 <table>
-  <tr><th>Started (server time)</th><th>User</th><th>Statement</th><th>Took</th><th>Rows</th><th>Status</th></tr>
-${queryRows}
+  <thead>
+    <tr><th scope="col">Started (your time)</th><th scope="col">User</th><th scope="col">Statement</th><th scope="col">Took</th><th scope="col">Rows</th><th scope="col">Status</th></tr>
+  </thead>
+  <tbody>
+${timingsRows}
+  </tbody>
 </table>
+</div>
 </div>`;
 
   // Only the read-only endpoints are links: a link is a GET. Seed is a button of its
@@ -549,6 +867,8 @@ ${renderTabs(
   { hash: true },
 )}
 ${REFRESH_SCRIPT}
+${CHART_SCRIPT}
+${TIMES_SCRIPT}
 ${CLEAR_SCRIPT}`;
 
   return renderPage({ title: 'snowtest — Snowflake-compatible stub server', body, version, nav: 'home' });
