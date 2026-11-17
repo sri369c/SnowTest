@@ -173,6 +173,8 @@ const STYLES = `
   /* The timings chart. Inline SVG, so each part is one class and no library. */
   .charthead { display: flex; align-items: baseline; justify-content: space-between;
                gap: 1rem; flex-wrap: wrap; }
+  /* Landing on the chart from a bar: not flush against the top of the window. */
+  #timings-chart { scroll-margin-top: .75rem; }
   .chartwrap { position: relative; margin: .5rem 0 .25rem; }
   .chartwrap svg { display: block; width: 100%; height: auto; overflow: visible; }
   .chartwrap .hit { fill: transparent; cursor: pointer; }

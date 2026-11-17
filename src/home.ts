@@ -168,6 +168,14 @@ const CHART_SCRIPT = `<script>
     event.preventDefault();
     location.assign(hit.dataset.href);
   });
+  // A bar is a link, and #timings is a tab name, not an element to land on —
+  // so arriving from one would otherwise start at the top of the page. Wait for
+  // load, because the tab script hides the other panels and moves this one up.
+  addEventListener('load', () => {
+    if (location.hash !== '#timings') return;
+    const chart = document.getElementById('timings-chart');
+    if (chart) chart.scrollIntoView({ block: 'start' });
+  });
 })();
 </script>`;
 
@@ -427,7 +435,7 @@ function renderVolumeChart(
   // Nothing timed yet: a flat line at zero would look like a quiet day, not an
   // empty table, so say which one it is.
   if (volume.total === 0) {
-    return `<div class="card">
+    return `<div class="card" id="timings-chart">
 ${head}
 <p class="muted">Nothing in the last ${windowHours} hours is timed yet, so there is no line to draw. Run a statement and it appears.</p>
 </div>`;
@@ -521,7 +529,7 @@ ${head}
     })
     .join('');
 
-  return `<div class="card">
+  return `<div class="card" id="timings-chart">
 ${head}
 <div class="chartwrap">
 <div class="tooltip" id="chart-tip" hidden></div>
