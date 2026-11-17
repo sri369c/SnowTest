@@ -43,6 +43,36 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Install the DuckDB ICU extension
+        shell: bash
+        run: |
+          # Pinning the session timezone to UTC - and every TIMESTAMPTZ cast -
+          # needs DuckDB's ICU extension, and the node bindings do not ship it. A
+          # fresh runner has to download 16 MB for it, which is why vitest, with
+          # nineteen files starting at once, cannot be the thing that races for
+          # it: on windows-latest that race is lost and the suites fail with an
+          # ICU error that has nothing to do with the code under test. Install it
+          # here, serially, before any test runs.
+          for attempt in 1 2 3; do
+            if node -e '
+              const { DuckDBInstance } = require("@duckdb/node-api");
+              (async () => {
+                const db = await DuckDBInstance.create(":memory:");
+                const connection = await db.connect();
+                await connection.run("INSTALL icu");
+                await connection.run("LOAD icu");
+                console.log("icu ready");
+                process.exit(0);
+              })().catch((error) => { console.error(error.message); process.exit(1); });
+            '; then
+              echo "icu installed"
+              exit 0
+            fi
+            echo "attempt ${attempt} failed; retrying"
+            sleep 5
+          done
+          echo "::error::could not install DuckDB's ICU extension"
+          exit 1
       - run: npm run typecheck
       - run: npm test
 

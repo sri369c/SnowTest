@@ -33,7 +33,7 @@ describe('query history (in memory)', () => {
     server = await createServer({ dataDir: null });
   });
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('notes a successful statement where Snowflake keeps account usage', async () => {
@@ -140,7 +140,7 @@ describe('timings chart and the hour filter', () => {
     server = await createServer({ dataDir: null });
   });
   afterAll(async () => {
-    await server.close();
+    await server?.close();
   });
 
   it('draws one bucket for every hour in the window', async () => {

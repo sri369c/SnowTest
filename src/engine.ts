@@ -192,7 +192,18 @@ export class Engine {
   /** In memory unless a data directory is given. */
   static async create(dataDir: DataDir | null = null): Promise<Engine> {
     // UTC, not the host zone: TIMESTAMPTZ → TIMETZ/TIME/DATE conversions must not depend on where we run.
-    const instance = await DuckDBInstance.create(':memory:', { TimeZone: 'UTC' });
+    // Pinning the zone needs DuckDB's ICU extension, which the bindings do not ship.
+    let instance: DuckDBInstance;
+    try {
+      instance = await DuckDBInstance.create(':memory:', { TimeZone: 'UTC' });
+    } catch (error) {
+      const detail = (error as Error).message;
+      if (!/icu/i.test(detail)) throw error;
+      throw new Error(
+        `DuckDB could not load its ICU extension, which the UTC session timezone needs: ${detail} ` +
+          'Install it once with `INSTALL icu` (16 MB, needs network) or point duckdb_extension_directory at a copy.',
+      );
+    }
     const admin = await instance.connect();
     const noContextDir = await mkdtemp(join(tmpdir(), 'snowtest-'));
     const file = toSqlLiteral(join(noContextDir, 'no_context.duckdb'));
