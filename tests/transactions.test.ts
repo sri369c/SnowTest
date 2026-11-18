@@ -2,7 +2,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Clock } from '../src/config.js';
+import type { Clock } from '../src/config/config.js';
 import { splitStatements, StatementRouter } from '../src/sql/meta.js';
 import { createServer, type SnowtestServer } from '../src/server.js';
 import { Session, type SessionOptions } from '../src/engine/session.js';

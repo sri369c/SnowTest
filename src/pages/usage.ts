@@ -8,12 +8,12 @@
  * process answering the request, so the flags, defaults and failure modes it
  * lists are the ones in front of the reader.
  *
- * The configuration tables are rendered from `src/options.ts`, the same table
+ * The configuration tables are rendered from `src/config/options.ts`, the same table
  * `--help` prints. Anything hand-written here is limited to things a client can
  * observe: the launcher, the control plane, staging, and troubleshooting.
  */
 
-import { ENV_ONLY, OPTIONS } from '../options.js';
+import { ENV_ONLY, OPTIONS } from '../config/options.js';
 import { escapeHtml, inlineMarkup, renderPage, renderTabs } from './page.js';
 
 const dash = '<span class="null">—</span>';

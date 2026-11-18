@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { SnowtestConfig } from '../src/config.js';
+import type { SnowtestConfig } from '../src/config/config.js';
 import { renderHome } from '../src/pages/home.js';
 import { GROUPS, LANDING_SURFACES, UNSUPPORTED, renderOperations } from '../src/pages/operations.js';
 import { escapeHtml, inlineMarkup } from '../src/pages/page.js';

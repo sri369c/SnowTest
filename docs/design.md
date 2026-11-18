@@ -82,9 +82,10 @@ handled in one place (`src/http/types.ts`).
 src/
   cli.ts           entry point (dist/cli.js)
   server.ts        HTTP routes, gzip decoding, request/response plumbing
-  config.ts        defaults and environment resolution
-  options.ts       flags and environment, shared by --help and /configuration
-  version.ts       snowtest current version, read from package.json
+  config/
+    config.ts      defaults and environment resolution
+    options.ts     flags and environment, shared by --help and /configuration
+    version.ts     snowtest current version, read from package.json
   engine/
     engine.ts      DuckDB instance, per-session connections, catalog introspection
     catalog.ts     databases, schemas, warehouses, roles, stages

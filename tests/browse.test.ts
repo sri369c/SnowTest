@@ -9,7 +9,7 @@ import {
   renderPreview,
   renderSchema,
 } from '../src/pages/browse.js';
-import type { SnowtestConfig } from '../src/config.js';
+import type { SnowtestConfig } from '../src/config/config.js';
 import { HOME_TABS, renderHome } from '../src/pages/home.js';
 
 const config: SnowtestConfig = {

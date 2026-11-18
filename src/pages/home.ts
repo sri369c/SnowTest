@@ -12,7 +12,7 @@
  * written here, so the overview cannot advertise more than the reference lists.
  */
 
-import type { SnowtestConfig } from '../config.js';
+import type { SnowtestConfig } from '../config/config.js';
 import { LANDING_SURFACES } from './operations.js';
 import { escapeHtml, renderPage, renderTabs } from './page.js';
 

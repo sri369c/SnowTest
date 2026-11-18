@@ -18,7 +18,7 @@ import { gunzipSync, inflateSync } from 'node:zlib';
 import { Hono, type Context } from 'hono';
 
 import { Catalog, normalizeName } from './engine/catalog.js';
-import { loadConfig, type SnowtestConfig } from './config.js';
+import { loadConfig, type SnowtestConfig } from './config/config.js';
 import { Engine, quoteIdent, type EngineConnection } from './engine/engine.js';
 import {
   SnowflakeError,
@@ -45,7 +45,7 @@ import {
 import { renderOperations } from './pages/operations.js';
 import { renderSelfTest, runSelfChecks } from './http/selfcheck.js';
 import { renderConfiguration, renderTroubleshooting } from './pages/usage.js';
-import { PACKAGE_VERSION } from './version.js';
+import { PACKAGE_VERSION } from './config/version.js';
 import { StatementRouter, type Outcome } from './sql/meta.js';
 import { DataDir } from './engine/persist.js';
 import {
