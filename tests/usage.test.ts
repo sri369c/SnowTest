@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULTS } from '../src/config/config.js';
+import { DEFAULTS } from '../src/config/server-config.js';
 import { ENV_ONLY, OPTIONS, helpText } from '../src/config/options.js';
 import { renderConfiguration, renderTroubleshooting } from '../src/pages/usage.js';
 

@@ -4,7 +4,7 @@
 /** Command-line entry point: `snowtest [--port 8080]`. */
 
 import { createServer } from './server.js';
-import { loadConfig, parsePort, type SnowtestConfig } from './config/config.js';
+import { loadConfig, parsePort, type SnowtestConfig } from './config/server-config.js';
 import { OPTIONS, helpText } from './config/options.js';
 import { SERVER_VERSION } from './http/protocol.js';
 import { PACKAGE_VERSION } from './config/version.js';

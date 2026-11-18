@@ -18,7 +18,7 @@ import { gunzipSync, inflateSync } from 'node:zlib';
 import { Hono, type Context } from 'hono';
 
 import { Catalog, normalizeName } from './engine/catalog.js';
-import { loadConfig, type SnowtestConfig } from './config/config.js';
+import { loadConfig, type SnowtestConfig } from './config/server-config.js';
 import { Engine, quoteIdent, type EngineConnection } from './engine/engine.js';
 import {
   SnowflakeError,

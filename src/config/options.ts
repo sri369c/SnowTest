@@ -10,7 +10,7 @@
  * flag the other does not.
  */
 
-import { DEFAULTS, type SnowtestConfig } from './config.js';
+import { DEFAULTS, type SnowtestConfig } from './server-config.js';
 
 export interface OptionSpec {
   /** Long flag, with the `--`. */
