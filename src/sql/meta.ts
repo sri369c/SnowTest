@@ -28,6 +28,7 @@ import {
 import type { DataDir } from '../engine/persist.js';
 import type { Session } from '../engine/session.js';
 import { StageStore } from './stage.js';
+import { StatementInterceptor } from '../interceptor.js';
 import { formatTimestamp, toSnowflakeType, toSnowflakeTypeName, type SnowflakeColumn } from '../http/types.js';
 
 export interface Outcome {
@@ -464,6 +465,9 @@ function canonicalName(raw: string): string {
 }
 
 export class StatementRouter {
+  /** Everything that happens around a statement, in one place. */
+  private readonly interceptor: StatementInterceptor;
+
   constructor(
     private readonly engine: Engine,
     private readonly catalog: Catalog,
@@ -471,7 +475,9 @@ export class StatementRouter {
     private readonly dataDir: DataDir | null = null,
     /** Called after a database is dropped, so the server can clear every session's context. */
     private readonly onDatabaseDropped: (database: string) => void = () => {},
-  ) {}
+  ) {
+    this.interceptor = new StatementInterceptor(engine, catalog);
+  }
 
   private async connectionFor(session: Session): Promise<EngineConnection> {
     let connection = session.connection as EngineConnection | null;
@@ -490,60 +496,7 @@ export class StatementRouter {
       return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.select);
     }
 
-    const verb = /^([a-z]+)/i.exec(statement)?.[1]?.toUpperCase() ?? '';
-    // Timed around the work and closed before the history write, so the row
-    // reports the statement's cost and not the cost of recording it.
-    const startedAt = new Date();
-    const startedMs = Date.now();
-    try {
-      const outcome = await this.route(statement, session, options);
-      await this.noteQuery(statement, verb, session, startedAt, Date.now() - startedMs, outcome, null);
-      return outcome;
-    } catch (error) {
-      await this.noteQuery(statement, verb, session, startedAt, Date.now() - startedMs, null, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Note one statement in SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY.
-   *
-   * Bookkeeping never fails a client's statement: if the history write breaks, the
-   * warning lands in the server log and the result still reaches the caller. The
-   * record is a convenience here, not a participant.
-   */
-  private async noteQuery(
-    statement: string,
-    verb: string,
-    session: Session,
-    startedAt: Date,
-    elapsedMs: number,
-    outcome: Outcome | null,
-    error: unknown,
-  ): Promise<void> {
-    const failure = error instanceof SnowflakeError ? error : null;
-    try {
-      await this.engine.recordQuery({
-        queryText: statement.length > 200 ? `${statement.slice(0, 197)}...` : statement,
-        databaseName: session.database,
-        schemaName: session.schema,
-        queryType: verb,
-        sessionId: session.id,
-        userName: session.user,
-        roleName: session.role,
-        warehouseName: session.warehouse || null,
-        warehouseSize: this.catalog.warehouses.get(session.warehouse)?.size ?? null,
-        executionStatus: error ? 'FAIL' : 'SUCCESS',
-        errorCode: failure?.code ?? (error ? 'SNOWTEST_INTERNAL' : null),
-        errorMessage: failure?.message ?? (error ? String(error) : null),
-        startedAt,
-        endedAt: new Date(),
-        totalElapsedTime: elapsedMs,
-        rowsProduced: outcome ? (outcome.rows.length > 0 ? outcome.rows.length : outcome.rowsAffected) : 0,
-      });
-    } catch (historyError) {
-      process.stderr.write(`snowtest: query history write failed: ${String(historyError)}\n`);
-    }
+    return this.interceptor.run(statement, session, () => this.route(statement, session, options));
   }
 
   /** One statement, routed. `execute` wraps this so every statement is timed and noted. */
