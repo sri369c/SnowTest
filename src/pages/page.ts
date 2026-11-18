@@ -124,7 +124,9 @@ const STYLES = `
   .modal input { font: inherit; font-size: .9rem; padding: .3rem .55rem; width: 100%; box-sizing: border-box;
                  border: 1px solid #d0d7de; border-radius: 6px; }
   .modal-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
-  td.sql { max-width: 34rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Narrow enough that the timings table fits without scrolling sideways,
+     wide enough to still read a statement. */
+  td.sql { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .refresh:hover { background: #f6f8fa; border-color: #0969da; }
   .refresh svg { width: 14px; height: 14px; }
@@ -248,6 +250,15 @@ const STYLES = `
   @media (prefers-color-scheme: dark) {
     .settings-control { background: #161b22; border-color: #30363d; }
     .settings-control select { background: #0d1117; border-color: #30363d; }
+  }
+
+  /* The rows dropdown above the timings table. */
+  .timings-filter { display: flex; align-items: center; gap: .5rem; margin: .6rem 0 .3rem; }
+  .timings-filter label { font-size: .9rem; color: #57606a; }
+  .timings-filter select { font: inherit; font-size: .9rem; padding: .3rem 2rem .3rem .55rem;
+                           border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: inherit; }
+  @media (prefers-color-scheme: dark) {
+    .timings-filter select { background: #161b22; border-color: #30363d; }
   }
 `;
 

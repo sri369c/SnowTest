@@ -87,6 +87,13 @@ const randomToken = (): string => randomUUID().replace(/-/g, '');
 
 const log = (...args: unknown[]): void => console.log(new Date().toISOString(), ...args);
 
+/**
+ * An hour is a bounded slice, so selecting one shows all of it instead of the
+ * latest page. The cap is the engine's own row limit; an hour with more than a
+ * thousand statements keeps the most recent thousand, which the page says out loud.
+ */
+const HOUR_LIMIT = 1000;
+
 /** Collapse whitespace and cap length so text stays on one log line. */
 function oneLine(text: string, max = 300): string {
   const flat = text.replace(/\s+/g, ' ').trim();
@@ -431,15 +438,20 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     // take the landing page down with it.
     const windowHours = readWindow(c.req.query('window'));
     const range = readRange(c.req.query('from'), c.req.query('to'));
+    // The rows dropdown: `model` narrows the table to statements a dbt model sent,
+    // which are the only ones that can carry a fidelity verdict.
+    const fidelityOnly = c.req.query('fidelity') === 'model';
     let queries: HomeQueryState[] = [];
     let queryCount = 0;
     let volume: HomeVolumeState | null = null;
     let filter: HomeFilterState | null = null;
     try {
-      queryCount = await engine.queryHistoryCount();
+      queryCount = await engine.queryHistoryCount({ onlyModels: fidelityOnly });
       volume = await engine.queryVolume(windowHours);
       if (range) {
-        queries = await engine.queryHistoryRange(range.from, range.to, PREVIEW_LIMIT);
+        queries = await engine.queryHistoryRange(range.from, range.to, HOUR_LIMIT, {
+          onlyModels: fidelityOnly,
+        });
         // The hour's own count, not the page's: a busy hour holds more
         // statements than the table below shows.
         const hour = volume.buckets.find(
@@ -448,7 +460,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         );
         filter = { ...range, statements: hour?.statements ?? queries.length };
       } else {
-        queries = await engine.queryHistory(PREVIEW_LIMIT);
+        queries = await engine.queryHistory(PREVIEW_LIMIT, { onlyModels: fidelityOnly });
       }
     } catch {
       queries = [];
@@ -487,6 +499,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         stages: catalog.stages.size,
         queries,
         queryCount,
+      fidelityOnly,
         volume,
         filter,
         windowHours,

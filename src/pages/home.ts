@@ -44,6 +44,8 @@ export interface HomeQueryState {
   rowsProduced: number;
   status: string;
   user: string;
+  /** The translation verdict, when the server recorded one. */
+  fidelity?: string | null;
 }
 
 /** Hourly statement counts behind the timings chart. */
@@ -71,6 +73,8 @@ export interface HomeState {
   queries: HomeQueryState[];
   /** Statements in the timings table, not just the ones the page lists. */
   queryCount: number;
+  /** True when the rows dropdown is set to statements a dbt model sent. */
+  fidelityOnly?: boolean;
   /** Hourly counts for the chart; null when the table could not be read. */
   volume?: HomeVolumeState | null;
   /** Set when a bar was clicked, so the table shows that hour only. */
@@ -423,9 +427,12 @@ function renderVolumeChart(
   volume: HomeVolumeState,
   windowHours: number,
   selected: HomeFilterState | null,
+  /** Query suffix to carry through every link: the rows dropdown is a choice the
+   *  reader made, and clicking an hour is not a reason to undo it. */
+  keep = '',
 ): string {
   const links = CHART_WINDOWS.map(([hours, label]) =>
-    hours === windowHours ? `<strong>${label}</strong>` : `<a href="/?window=${hours}#timings">${label}</a>`,
+    hours === windowHours ? `<strong>${label}</strong>` : `<a href="/?window=${hours}${keep}#timings">${label}</a>`,
   ).join(' <span class="muted">·</span> ');
   const head = `<div class="charthead">
     <span><strong>Statements per hour</strong> <span class="muted">&mdash; last ${windowHours} hours, ${volume.total} in the window</span></span>
@@ -519,8 +526,8 @@ ${head}
       // Clicking the hour that is already selected is how the filter is dropped.
       const href =
         index === selectedIndex
-          ? `/?window=${windowHours}#timings`
-          : `/?window=${windowHours}&from=${encodeURIComponent(bucket.start.toISOString())}&to=${encodeURIComponent(end.toISOString())}#timings`;
+          ? `/?window=${windowHours}${keep}#timings`
+          : `/?window=${windowHours}&from=${encodeURIComponent(bucket.start.toISOString())}&to=${encodeURIComponent(end.toISOString())}${keep}#timings`;
       return `<rect class="hit" x="${(x(index) - step / 2).toFixed(1)}" y="${top}" width="${step.toFixed(1)}" height="${height - top - bottom}" tabindex="0" role="link"
           data-href="${href}" data-cx="${x(index).toFixed(1)}" data-cy="${y(bucket.statements).toFixed(1)}"
           data-label="${label}" data-count="${bucket.statements}"
@@ -595,13 +602,22 @@ export function renderHome(
           `    <tr><td><code>${escapeHtml(session.user)}</code></td><td><code>${escapeHtml(session.database ?? 'NULL')}.${escapeHtml(session.schema ?? 'NULL')}</code></td><td>${escapeHtml(session.role)}</td><td>${escapeHtml(formatServerTime(session.createdAt))}</td><td>${formatDuration(now - session.createdAt.getTime())}</td></tr>`,
       )
       .join('\n') || '    <tr><td colspan="5">No active sessions.</td></tr>';
+  // The verdict is a hint, not a status: a statement that never went through a dbt
+  // model has none, and a dash is more honest than a green tick.
+  const fidelityCell = (fidelity: string | null): string =>
+    fidelity === null
+      ? '<span class="null">—</span>'
+      : fidelity.startsWith('approximate')
+        ? `<span class="pill pill-partial" title="${escapeHtml(fidelity)}">approximate</span>`
+        : '<span class="pill pill-supported">verified</span>';
+
   const queryRows =
     state.queries
       .map(
         (query) =>
-          `    <tr><td data-at="${query.startedAt.toISOString()}">${escapeHtml(formatServerTime(query.startedAt))}</td><td><code>${escapeHtml(query.user)}</code></td><td class="sql" title="${escapeHtml(query.queryText)}">${escapeHtml(shorten(query.queryText, 90))}</td><td class="num">${escapeHtml(formatElapsed(query.elapsedMs))}</td><td class="num">${query.rowsProduced}</td><td>${escapeHtml(query.status)}</td></tr>`,
+          `    <tr><td data-at="${query.startedAt.toISOString()}">${escapeHtml(formatServerTime(query.startedAt))}</td><td><code>${escapeHtml(query.user)}</code></td><td class="sql" title="${escapeHtml(query.queryText)}">${escapeHtml(shorten(query.queryText, 90))}</td><td class="num">${escapeHtml(formatElapsed(query.elapsedMs))}</td><td class="num">${query.rowsProduced}</td><td>${escapeHtml(query.status)}</td><td>${fidelityCell(query.fidelity ?? null)}</td></tr>`,
       )
-      .join('\n') || '    <tr><td colspan="6">No statements recorded yet.</td></tr>';
+      .join('\n') || '    <tr><td colspan="7">No statements recorded yet.</td></tr>';
   const surfaceRows = LANDING_SURFACES.map(
     (surface) =>
       `  <tr><th scope="row"><a href="/operations#${escapeHtml(surface.id)}">${escapeHtml(surface.label)}</a></th><td>${escapeHtml(surface.summary)} <span class="muted">(${surface.supported} of ${surface.total} supported)</span></td></tr>`,
@@ -773,24 +789,70 @@ ${surfaceRows}
   // The count is the whole table; the list underneath is only its latest page, so
   // say both numbers whenever they differ.
   const windowHours = state.windowHours ?? 24;
+  const fidelityOnly = state.fidelityOnly ?? false;
   const filter = state.filter ?? null;
   const volume = state.volume ?? null;
+  // The hour labels carry their instant, so the page can re-render them in the
+  // browser's zone without a round trip.
+  const hourFrom = filter
+    ? `<span data-hour-at="${filter.from.toISOString()}">${escapeHtml(formatHour(filter.from))}</span>`
+    : '';
+  const hourTo = filter
+    ? `<span data-hour-at="${filter.to.toISOString()}">${escapeHtml(formatHour(filter.to))}</span>`
+    : '';
   const timingsCount = filter
-    ? `${filter.statements} statement(s) started between <span data-hour-at="${filter.from.toISOString()}">${escapeHtml(formatHour(filter.from))}</span> and <span data-hour-at="${filter.to.toISOString()}">${escapeHtml(formatHour(filter.to))}</span>; the latest ${state.queries.length} of them are below.`
-    : state.queries.length < state.queryCount
-      ? `${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, the latest ${state.queries.length} below.`
-      : `${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, all of them below.`;
+    ? fidelityOnly
+      ? `${filter.statements} statement(s) started between ${hourFrom} and ${hourTo}; ${state.queries.length} of them came from a dbt model, shown below.`
+      : `${filter.statements} statement(s) started between ${hourFrom} and ${hourTo}, ${
+          state.queries.length < filter.statements
+            ? `the ${state.queries.length} most recent below`
+            : 'all of them below'
+        }.`
+    : fidelityOnly
+      ? `${state.queryCount} statement(s) came from a dbt model, the latest ${state.queries.length} below.`
+      : state.queries.length < state.queryCount
+        ? `${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, the latest ${state.queries.length} below.`
+        : `${state.queryCount} statement(s) in <code>SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY</code>, all of them below.`;
   const timingsRows =
     state.queries.length > 0
       ? queryRows
-      : `    <tr><td colspan="6" class="empty">${filter ? 'No statements in this hour.' : 'No statements recorded yet.'}</td></tr>`;
+      : `    <tr><td colspan="7" class="empty">${filter ? 'No statements in this hour.' : fidelityOnly ? 'No statements from a dbt model yet.' : 'No statements recorded yet.'}</td></tr>`;
   // Only rendered while an hour is selected, so there is nothing to hide — and
   // nothing that can stay on screen after the filter is cleared.
   const chip = filter
-    ? `<div class="chip"><span data-span-from="${filter.from.toISOString()}" data-span-to="${filter.to.toISOString()}">${escapeHtml(formatHour(filter.from))}–${escapeHtml(formatHour(filter.to))}</span> &middot; ${filter.statements} statement(s)<a href="/?window=${windowHours}#timings" title="Clear the hour filter" aria-label="Clear the hour filter">×</a></div>`
+    ? `<div class="chip"><span data-span-from="${filter.from.toISOString()}" data-span-to="${filter.to.toISOString()}">${escapeHtml(formatHour(filter.from))}–${escapeHtml(formatHour(filter.to))}</span> &middot; ${filter.statements} statement(s)<a href="/?window=${windowHours}${fidelityOnly ? '&fidelity=model' : ''}#timings" title="Clear the hour filter" aria-label="Clear the hour filter">×</a></div>`
     : '';
 
   // `timings-body` is swapped in place by this tab's own refresh button.
+  // Between the chart and the table, where the eye already is: which rows this
+  // table shows. A real form, so it still works with the script switched off.
+  const rowsFilter = `<form class="timings-filter" id="timings-fidelity-form" method="get" action="/">
+  <input type="hidden" name="window" value="${windowHours}">
+  ${filter ? `  <input type="hidden" name="from" value="${filter.from.toISOString()}">` : ''}
+  ${filter ? `  <input type="hidden" name="to" value="${filter.to.toISOString()}">` : ''}
+  <label for="timings-fidelity">Rows</label>
+  <select id="timings-fidelity" name="fidelity">
+    <option value=""${fidelityOnly ? '' : ' selected'}>All statements</option>
+    <option value="model"${fidelityOnly ? ' selected' : ''}>Only statements from dbt models</option>
+  </select>
+  <noscript><button class="refresh" type="submit">Apply</button></noscript>
+</form>
+<script>
+(() => {
+  const form = document.getElementById('timings-fidelity-form');
+  const box = document.getElementById('timings-fidelity');
+  if (!form || !box) return;
+  box.addEventListener('change', () => {
+    const query = new URLSearchParams();
+    for (const [key, value] of new FormData(form)) {
+      if (typeof value === 'string' && value !== '') query.set(key, value);
+    }
+    const search = query.toString();
+    location.assign('/' + (search ? '?' + search : '') + '#timings');
+  });
+})();
+</script>`;
+
   const timings = `<div class="livebar"><span class="muted" data-stamp aria-live="polite"></span><button type="button" class="refresh" data-refresh="timings-body" title="Refresh the query timings">${REFRESH_ICON}Refresh</button></div>
 <div id="timings-body">
 <p class="muted">
@@ -799,12 +861,14 @@ ${surfaceRows}
   Snowflake keeps it. It is a real table — query it from a client for anything
   older than this preview.
 </p>
-${volume ? renderVolumeChart(volume, windowHours, filter) : ''}
+${volume ? renderVolumeChart(volume, windowHours, filter, fidelityOnly ? '&fidelity=model' : '') : ''}
+${fidelityOnly ? '<p class="muted">The chart and its count cover every statement; only the table below is narrowed.</p>' : ''}
 ${chip}
+${rowsFilter}
 <div class="vscroll">
 <table>
   <thead>
-    <tr><th scope="col">Started (your time)</th><th scope="col">User</th><th scope="col">Statement</th><th scope="col">Took</th><th scope="col">Rows</th><th scope="col">Status</th></tr>
+    <tr><th scope="col">Started (your time)</th><th scope="col">User</th><th scope="col">Statement</th><th scope="col">Took</th><th scope="col">Rows</th><th scope="col">Status</th><th scope="col">Fidelity</th></tr>
   </thead>
   <tbody>
 ${timingsRows}

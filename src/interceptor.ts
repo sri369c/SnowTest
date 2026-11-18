@@ -76,16 +76,26 @@ export class StatementInterceptor {
       }
     }
 
+    // The verdict goes into the history row itself: a statement that named no dbt
+    // model has none to give, and the column says so with NULL rather than a guess.
+    // Read at write time, not up front: the notes are collected while the router
+    // translates, which happens inside route().
+    const verdict = (): string | null => {
+      if (!tracking || nodeId === null) return null;
+      const constructs = [...new Set(approximated.map((note) => note.feature))];
+      return constructs.length > 0 ? `approximate: ${constructs.join(', ')}` : 'verified';
+    };
+
     const verb = this.verbOf(input.statement);
     const startedAt = new Date();
     const startedMs = Date.now();
     try {
       const outcome = await input.route(tracking ? sink : undefined);
-      await this.noteQuery(input.statement, verb, input.session, startedAt, Date.now() - startedMs, outcome, null);
+      await this.noteQuery(input.statement, verb, input.session, startedAt, Date.now() - startedMs, outcome, null, verdict());
       if (tracking) await this.noteFidelity(nodeId, approximated);
       return outcome;
     } catch (error) {
-      await this.noteQuery(input.statement, verb, input.session, startedAt, Date.now() - startedMs, null, error);
+      await this.noteQuery(input.statement, verb, input.session, startedAt, Date.now() - startedMs, null, error, verdict());
       if (tracking) await this.noteFidelity(nodeId, approximated);
       throw error;
     }
@@ -105,6 +115,7 @@ export class StatementInterceptor {
     elapsedMs: number,
     outcome: Outcome | null,
     error: unknown,
+    fidelity: string | null,
   ): Promise<void> {
     const failure = error instanceof SnowflakeError ? error : null;
     try {
@@ -130,6 +141,7 @@ export class StatementInterceptor {
         endedAt: new Date(),
         totalElapsedTime: elapsedMs,
         rowsProduced: outcome ? outcome.rows.length || outcome.rowsAffected : 0,
+        fidelity,
       });
     } catch (historyError) {
       process.stderr.write(`snowtest: query history write failed: ${String(historyError)}\n`);
