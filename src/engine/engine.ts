@@ -90,11 +90,17 @@ const HISTORY_DATABASE = 'SNOWFLAKE';
 const HISTORY_SCHEMA = 'ACCOUNT_USAGE';
 const HISTORY_TABLE = 'QUERY_HISTORY';
 const HISTORY_SEQUENCE = 'QUERY_HISTORY_SEQ';
+/**
+ * Model fidelity, one row per statement per construct it approximated. Append-only
+ * like query history: the report aggregates, and a reset empties it.
+ */
+const FIDELITY_TABLE = 'MODEL_FIDELITY';
+const FIDELITY_SEQUENCE = 'MODEL_FIDELITY_SEQ';
 /** Not `.duckdb`: DataDir restores every `.duckdb` file as a user database, and this is not one. */
 const HISTORY_FILE = 'query_history.db';
 
 /** The columns the pages read, in the order `toHistoryEntry` expects them. */
-const HISTORY_COLUMNS = `SELECT query_text, start_time, total_elapsed_time, rows_produced, execution_status, user_name
+const HISTORY_COLUMNS = `SELECT query_text, start_time, total_elapsed_time, rows_produced, execution_status, user_name, fidelity
        FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}`;
 
 const HOUR_MS = 3_600_000;
@@ -111,6 +117,7 @@ function toHistoryEntry(row: unknown[]): QueryHistoryEntry {
     rowsProduced: Number(row[3] ?? 0),
     status: String(row[4] ?? ''),
     user: String(row[5] ?? ''),
+    fidelity: row[6] === null || row[6] === undefined ? null : String(row[6]),
   };
 }
 
@@ -122,6 +129,8 @@ export interface QueryHistoryEntry {
   rowsProduced: number;
   status: string;
   user: string;
+  /** How the translation held up, when a dbt model sent the statement. */
+  fidelity: string | null;
 }
 
 /** One hour of the timings chart: how many statements started in it. */
@@ -158,6 +167,7 @@ export interface QueryHistoryRecord {
   endedAt: Date;
   totalElapsedTime: number;
   rowsProduced: number;
+  fidelity: string | null;
 }
 
 export interface TableInfo {
@@ -243,7 +253,32 @@ export class Engine {
          start_time TIMESTAMP,
          end_time TIMESTAMP,
          total_elapsed_time BIGINT,
-         rows_produced BIGINT
+         rows_produced BIGINT,
+         fidelity VARCHAR
+       )`,
+    );
+    // A volume written by 4.x has this table without the verdict column. Adding it
+    // in place keeps every timing row; the column is NULL on them because the verdict
+    // was never recorded for a statement that ran before this release, and an
+    // invented "verified" would be a lie the report could not walk back.
+    const hasFidelity = await this.queryOnAdmin(
+      `SELECT count(*) FROM information_schema.columns
+       WHERE table_name = '${HISTORY_TABLE}' AND column_name = 'fidelity'`,
+    );
+    if (Number(hasFidelity[0]?.[0] ?? 0) === 0) {
+      await this.admin.run(
+        `ALTER TABLE ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE} ADD COLUMN fidelity VARCHAR`,
+      );
+    }
+    await this.admin.run(
+      `CREATE SEQUENCE IF NOT EXISTS ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_SEQUENCE} START 1`,
+    );
+    await this.admin.run(
+      `CREATE TABLE IF NOT EXISTS ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_TABLE} (
+         statement_id BIGINT NOT NULL,
+         node_id VARCHAR NOT NULL,
+         construct VARCHAR NOT NULL,
+         recorded_at TIMESTAMP
        )`,
     );
   }
@@ -264,40 +299,89 @@ export class Engine {
        INSERT INTO ${target}
          (query_id, query_text, database_name, schema_name, query_type, session_id,
           user_name, role_name, warehouse_name, warehouse_size, execution_status,
-          error_code, error_message, start_time, end_time, total_elapsed_time, rows_produced)
+          error_code, error_message, start_time, end_time, total_elapsed_time, rows_produced, fidelity)
        SELECT v,
               ${value(record.queryText)}, ${value(record.databaseName)}, ${value(record.schemaName)},
               ${value(record.queryType)}, ${value(record.sessionId)}, ${value(record.userName)},
               ${value(record.roleName)}, ${value(record.warehouseName)}, ${value(record.warehouseSize)},
               ${value(record.executionStatus)}, ${value(record.errorCode)}, ${value(record.errorMessage)},
               TIMESTAMP '${utcStamp(record.startedAt)}', TIMESTAMP '${utcStamp(record.endedAt)}',
-              ${value(record.totalElapsedTime)}, ${value(record.rowsProduced)}
+              ${value(record.totalElapsedTime)}, ${value(record.rowsProduced)}, ${value(record.fidelity)}
        FROM n`,
     );
   }
 
-  /** How many statements the table holds, for the Clear Data tab. */
-  async queryHistoryCount(): Promise<number> {
+  /**
+   * Note what one statement did for model fidelity: the dbt node it came from and
+   * every construct the translation only approximated. A clean statement writes a
+   * single row with an empty construct, which is what keeps statement counts
+   * honest when a model approximates nothing.
+   */
+  async recordFidelity(statement: { nodeId: string | null; constructs: string[] }): Promise<void> {
+    if (!statement.nodeId) return;
+    const target = `${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_TABLE}`;
+    const [seed] = await this.queryOnAdmin(
+      `SELECT nextval('${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_SEQUENCE}')`,
+    );
+    const statementId = String(seed?.[0] ?? 0);
+    const constructs = statement.constructs.length > 0 ? statement.constructs : [''];
+    for (const construct of constructs) {
+      await this.admin.run(
+        `INSERT INTO ${target} (statement_id, node_id, construct, recorded_at)
+         VALUES (${statementId}, ${toSqlLiteral(statement.nodeId)}, ${toSqlLiteral(construct)}, current_timestamp)`,
+      );
+    }
+  }
+
+  /** Per-model fidelity as the report shows it: statements seen, constructs approximated. */
+  async fidelityReport(): Promise<Array<{ nodeId: string; statements: number; constructs: string[]; lastSeen: string | null }>> {
+    const target = `${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_TABLE}`;
     const rows = await this.queryOnAdmin(
-      `SELECT count(*) FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}`,
+      `SELECT node_id, count(DISTINCT statement_id),
+              string_agg(DISTINCT construct, ', ') FILTER (WHERE construct <> ''),
+              max(recorded_at)
+       FROM ${target} GROUP BY node_id ORDER BY node_id`,
+    );
+    return rows.map((row) => ({
+      nodeId: String(row[0]),
+      statements: Number(row[1] ?? 0),
+      constructs: row[2] ? String(row[2]).split(', ') : [],
+      lastSeen: row[3] ? String(row[3]) : null,
+    }));
+  }
+
+  /** Empty the ledger, for a reset that promises a clean account. */
+  async clearFidelity(): Promise<void> {
+    await this.admin.run(`DELETE FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_TABLE}`);
+  }
+
+  /** How many statements the table holds, for the Clear Data tab. */
+  async queryHistoryCount(options: { onlyModels?: boolean } = {}): Promise<number> {
+    const rows = await this.queryOnAdmin(
+      `SELECT count(*) FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${HISTORY_TABLE}${options.onlyModels ? ' WHERE fidelity IS NOT NULL' : ''}`,
     );
     return Number(rows[0]?.[0] ?? 0);
   }
 
   /** Newest statements first, for the landing page. */
-  async queryHistory(limit = 15): Promise<QueryHistoryEntry[]> {
+  async queryHistory(limit = 15, options: { onlyModels?: boolean } = {}): Promise<QueryHistoryEntry[]> {
     const rows = await this.queryOnAdmin(
-      `${HISTORY_COLUMNS}
+      `${HISTORY_COLUMNS}${options.onlyModels ? ' WHERE fidelity IS NOT NULL' : ''}
        ORDER BY query_id DESC LIMIT ${rowLimit(limit)}`,
     );
     return rows.map(toHistoryEntry);
   }
 
   /** The statements that started inside `[from, to)`, newest first. */
-  async queryHistoryRange(from: Date, to: Date, limit = 50): Promise<QueryHistoryEntry[]> {
+  async queryHistoryRange(
+    from: Date,
+    to: Date,
+    limit = 50,
+    options: { onlyModels?: boolean } = {},
+  ): Promise<QueryHistoryEntry[]> {
     const rows = await this.queryOnAdmin(
       `${HISTORY_COLUMNS}
-       WHERE start_time >= TIMESTAMP '${utcStamp(from)}' AND start_time < TIMESTAMP '${utcStamp(to)}'
+       WHERE start_time >= TIMESTAMP '${utcStamp(from)}' AND start_time < TIMESTAMP '${utcStamp(to)}'${options.onlyModels ? ' AND fidelity IS NOT NULL' : ''}
        ORDER BY query_id DESC LIMIT ${rowLimit(limit)}`,
     );
     return rows.map(toHistoryEntry);

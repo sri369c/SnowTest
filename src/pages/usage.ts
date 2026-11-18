@@ -23,7 +23,7 @@ function flagTable(): string {
     const usage = `${escapeHtml(option.flag)}${option.argument ? ` ${escapeHtml(option.argument)}` : ''}`;
     const env = option.env ? `<code>${escapeHtml(option.env)}</code>` : dash;
     const fallback = option.default ? `<code>${escapeHtml(option.default)}</code>` : dash;
-    return `      <tr><td><code>${usage}</code></td><td>${env}</td><td>${fallback}</td><td>${escapeHtml(option.description)}</td></tr>`;
+return `      <tr><td><code>${usage}</code></td><td>${env}</td><td>${fallback}</td><td class="purpose">${escapeHtml(option.description)}</td></tr>`;
   }).join('\n');
 }
 
@@ -58,7 +58,8 @@ const pane = (title: string, html: string): string => `<h2 class="panehead">${es
 
 const FLAGS = `<p class="muted">Flags override environment variables. Defaults are the server's own;
 the container launchers set <code>SNOWTEST_PORT=3030</code>.</p>
-<table>
+<table class="flagtable">
+
   <thead>
     <tr><th scope="col">Flag</th><th scope="col">Environment</th><th scope="col">Default</th><th scope="col">Purpose</th></tr>
   </thead>

@@ -176,6 +176,12 @@ export const GROUPS: OperationGroup[] = [
       { syntax: 'GET /', behaviour: 'The landing page: what this is, and how to connect.', status: 'supported', since: '1.0.0' },
       { syntax: 'GET /operations', behaviour: 'This page.', status: 'supported', since: '1.0.0' },
       {
+        syntax: 'GET /settings',
+        behaviour: 'The settings that can be changed while the server runs: the model-fidelity mode, with what each one does, a dropdown and an apply button. `POST /_snowtest/fidelity` is the same change from curl.',
+        status: 'supported',
+        since: '5.0.0',
+      },
+      {
         syntax: 'GET /configuration',
         behaviour: 'Flags and environment, the launcher, the control plane and staging, for the running build. `GET /usage` redirects here.',
         status: 'supported',
@@ -211,6 +217,20 @@ export const GROUPS: OperationGroup[] = [
         behaviour: 'Databases, schemas, warehouses, roles, stages and session count.',
         status: 'supported',
         since: '1.0.0',
+      },
+      {
+        syntax: 'POST /_snowtest/fidelity',
+        behaviour:
+          'Sets the model-fidelity mode from `{"value": "off" | "report" | "strict"}`. Applied per statement, so the next query uses it; saved in `settings.json` when the server has a data directory. Refused while `--fidelity` or `SNOWTEST_FIDELITY` pins the mode.',
+        status: 'supported',
+        since: '5.0.0',
+      },
+      {
+        syntax: 'GET /_snowtest/models',
+        behaviour:
+          'Per-model fidelity: the mode in force, and for each dbt model the statements seen, the constructs approximated and a `verified` or `approximate` verdict.',
+        status: 'supported',
+        since: '5.0.0',
       },
       {
         syntax: 'POST /_snowtest/seed',
@@ -345,7 +365,7 @@ export const GROUPS: OperationGroup[] = [
           'Every statement the server runs is timed and noted here, failures included: `query_id`, `query_text`, `database_name`, `schema_name`, `query_type`, `session_id`, `user_name`, `role_name`, `warehouse_name`, `warehouse_size`, `execution_status`, `error_code`, `error_message`, `start_time`, `end_time`, `total_elapsed_time` in milliseconds and `rows_produced`. A statement that reads this table does not see itself, because the row lands after the statement ends.',
         status: 'partial',
         since: '4.1.0',
-        note: 'Only the columns a stub can honestly fill: `bytes_scanned`, `bytes_written`, `credits_used_cloud_services` and the queue timings are absent rather than invented, and `total_elapsed_time` is wall clock rather than a compile/execute split. Rows are never pruned — the Clear Data tab, `POST /_snowtest/queries/clear` or a reset empties the table, and nothing else does.',
+        note: 'The `fidelity` column carries the translation verdict for a statement a dbt model sent — `verified`, or `approximate: <constructs>` — and NULL for everything else, including rows written before 5.0.0. Only the columns a stub can honestly fill: `bytes_scanned`, `bytes_written`, `credits_used_cloud_services` and the queue timings are absent rather than invented, and `total_elapsed_time` is wall clock rather than a compile/execute split. Rows are never pruned — the Clear Data tab, `POST /_snowtest/queries/clear` or a reset empties the table, and nothing else does.',
       },
       {
         syntax: 'CREATE | DROP STAGE',

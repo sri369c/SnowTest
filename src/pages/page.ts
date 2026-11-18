@@ -124,7 +124,9 @@ const STYLES = `
   .modal input { font: inherit; font-size: .9rem; padding: .3rem .55rem; width: 100%; box-sizing: border-box;
                  border: 1px solid #d0d7de; border-radius: 6px; }
   .modal-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
-  td.sql { max-width: 34rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Narrow enough that the timings table fits without scrolling sideways,
+     wide enough to still read a statement. */
+  td.sql { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .refresh:hover { background: #f6f8fa; border-color: #0969da; }
   .refresh svg { width: 14px; height: 14px; }
@@ -217,9 +219,50 @@ const STYLES = `
     .pill-partial { color: #d29922; border-color: #d29922; background: #2a2113; }
     .pill-unsupported { color: #f85149; border-color: #f85149; background: #2d1618; }
   }
+
+  /* Configuration flags: the flag and its argument stay on one line, and the
+     purpose column keeps body contrast instead of fading into the table. */
+  .ops .flagtable td:first-child { white-space: nowrap; }
+  .ops .flagtable td.purpose { color: inherit; }
+  .fidelitymodes td:first-child { width: 7rem; }
+  .fidelity-form { display: flex; align-items: center; gap: .6rem; margin: 1rem 0 .25rem; }
+  .fidelity-form label { font-size: .9rem; color: #57606a; }
+  .fidelity-form select { font: inherit; font-size: .9rem; padding: .3rem 2rem .3rem .55rem;
+                          border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: inherit; }
+  .fidelity-form select:disabled, .fidelity-form button:disabled { opacity: .55; cursor: not-allowed; }
+  .err-note { border: 1px solid #b42318; background: #fdecea; color: #b42318; border-radius: 6px;
+              padding: .5rem .75rem; margin: .5rem 0 .9rem; }
+  @media (prefers-color-scheme: dark) {
+    .fidelity-form select { background: #161b22; border-color: #30363d; }
+    .err-note { background: #2d1618; border-color: #f85149; color: #f85149; }
+  }
+
+  /* Settings: the control first, so it is the first thing on the page. */
+  .settings-control { border: 1px solid #d0d7de; border-radius: 10px; background: #f6f8fa;
+                      padding: 1rem 1.15rem; margin: 1.25rem 0 1.75rem; }
+  .settings-control-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+  .settings-control-row label { font-weight: 600; }
+  .settings-control select { font: inherit; font-size: 1rem; padding: .4rem 2.2rem .4rem .6rem;
+                             border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: inherit; }
+  .settings-control select:disabled, .settings-control button:disabled { opacity: .55; cursor: not-allowed; }
+  .settings-current { margin: .75rem 0 0; }
+  .settings-current .muted { margin-left: .35rem; }
+  @media (prefers-color-scheme: dark) {
+    .settings-control { background: #161b22; border-color: #30363d; }
+    .settings-control select { background: #0d1117; border-color: #30363d; }
+  }
+
+  /* The rows dropdown above the timings table. */
+  .timings-filter { display: flex; align-items: center; gap: .5rem; margin: .6rem 0 .3rem; }
+  .timings-filter label { font-size: .9rem; color: #57606a; }
+  .timings-filter select { font: inherit; font-size: .9rem; padding: .3rem 2rem .3rem .55rem;
+                           border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: inherit; }
+  @media (prefers-color-scheme: dark) {
+    .timings-filter select { background: #161b22; border-color: #30363d; }
+  }
 `;
 
-export type NavKey = 'home' | 'operations' | 'configuration' | 'troubleshooting' | 'self-test';
+export type NavKey = 'home' | 'operations' | 'configuration' | 'troubleshooting' | 'self-test' | 'settings';
 
 const NAV: Array<[NavKey, string, string]> = [
   ['home', '/', 'Home'],
@@ -227,6 +270,7 @@ const NAV: Array<[NavKey, string, string]> = [
   ['configuration', '/configuration', 'Configuration'],
   ['troubleshooting', '/troubleshooting', 'Troubleshooting'],
   ['self-test', '/self-test', 'Self Test'],
+  ['settings', '/settings', 'Settings'],
 ];
 
 export interface TabItem {

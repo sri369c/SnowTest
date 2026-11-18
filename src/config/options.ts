@@ -83,6 +83,15 @@ export const OPTIONS: OptionSpec[] = [
     type: 'string',
   },
   {
+    flag: '--fidelity',
+    argument: '<off|report|strict>',
+    env: 'SNOWTEST_FIDELITY',
+    default: DEFAULTS.fidelity,
+    description: 'Model-fidelity interceptor: off (no fidelity work), report (record what is approximated) or strict (refuse approximate SQL). Change it on the Settings page.',
+    configKey: 'fidelity',
+    type: 'string',
+  },
+  {
     flag: '--data-dir',
     argument: '<dir>',
     env: 'SNOWTEST_DATA_DIR',

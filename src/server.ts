@@ -45,8 +45,11 @@ import {
 import { renderOperations } from './pages/operations.js';
 import { renderSelfTest, runSelfChecks } from './http/selfcheck.js';
 import { renderConfiguration, renderTroubleshooting } from './pages/usage.js';
+import { renderSettings } from './pages/fidelity.js';
+import { FIDELITY_IMPACT, FIDELITY_MODES, FidelitySetting } from './config/fidelity.js';
 import { PACKAGE_VERSION } from './config/version.js';
-import { StatementRouter, type Outcome } from './sql/meta.js';
+import { StatementRouter } from './sql/meta.js';
+import type { Outcome } from './sql/outcome.js';
 import { DataDir } from './engine/persist.js';
 import {
   SERVER_VERSION,
@@ -83,6 +86,13 @@ export interface SnowtestServer {
 const randomToken = (): string => randomUUID().replace(/-/g, '');
 
 const log = (...args: unknown[]): void => console.log(new Date().toISOString(), ...args);
+
+/**
+ * An hour is a bounded slice, so selecting one shows all of it instead of the
+ * latest page. The cap is the engine's own row limit; an hour with more than a
+ * thousand statements keeps the most recent thousand, which the page says out loud.
+ */
+const HOUR_LIMIT = 1000;
 
 /** Collapse whitespace and cap length so text stays on one log line. */
 function oneLine(text: string, max = 300): string {
@@ -267,6 +277,10 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     roles: config.roles,
   });
   const dataDir = config.dataDir ? await DataDir.open(config.dataDir) : null;
+  const fidelity = await FidelitySetting.open(dataDir?.root ?? null, {
+    mode: config.fidelity,
+    pinned: config.fidelityPinned,
+  });
   const engine = await Engine.create(dataDir);
   const statements = new Map<string, StoredStatement>();
   // Results of statements submitted with asyncExec, served via getResultUrl.
@@ -293,7 +307,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         session.schema = null;
       }
     }
-  });
+  }, () => fidelity.mode);
 
   // Statement handles and query records are caches, not history: keep them bounded
   // so a long-lived server cannot grow without limit. Map iteration is insert order.
@@ -424,15 +438,20 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     // take the landing page down with it.
     const windowHours = readWindow(c.req.query('window'));
     const range = readRange(c.req.query('from'), c.req.query('to'));
+    // The rows dropdown: `model` narrows the table to statements a dbt model sent,
+    // which are the only ones that can carry a fidelity verdict.
+    const fidelityOnly = c.req.query('fidelity') === 'model';
     let queries: HomeQueryState[] = [];
     let queryCount = 0;
     let volume: HomeVolumeState | null = null;
     let filter: HomeFilterState | null = null;
     try {
-      queryCount = await engine.queryHistoryCount();
+      queryCount = await engine.queryHistoryCount({ onlyModels: fidelityOnly });
       volume = await engine.queryVolume(windowHours);
       if (range) {
-        queries = await engine.queryHistoryRange(range.from, range.to, PREVIEW_LIMIT);
+        queries = await engine.queryHistoryRange(range.from, range.to, HOUR_LIMIT, {
+          onlyModels: fidelityOnly,
+        });
         // The hour's own count, not the page's: a busy hour holds more
         // statements than the table below shows.
         const hour = volume.buckets.find(
@@ -441,7 +460,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         );
         filter = { ...range, statements: hour?.statements ?? queries.length };
       } else {
-        queries = await engine.queryHistory(PREVIEW_LIMIT);
+        queries = await engine.queryHistory(PREVIEW_LIMIT, { onlyModels: fidelityOnly });
       }
     } catch {
       queries = [];
@@ -480,6 +499,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
         stages: catalog.stages.size,
         queries,
         queryCount,
+      fidelityOnly,
         volume,
         filter,
         windowHours,
@@ -501,8 +521,12 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
 
   // Flags and environment rendered from the same option table the CLI prints in
   // `--help`; `/usage` is the old address and redirects so bookmarks keep working.
-  app.get('/configuration', (c) => c.html(renderConfiguration(SERVER_VERSION)));
+app.get('/configuration', (c) => c.html(renderConfiguration(SERVER_VERSION)));
   app.get('/usage', (c) => c.redirect('/configuration', 301));
+
+  // The settings a reader can change while the server runs. Its own page, because
+  // a control is not a reference table and the nav is where it gets looked for.
+  app.get('/settings', (c) => c.html(renderSettings(SERVER_VERSION, fidelity.state)));
   app.get('/troubleshooting', (c) => c.html(renderTroubleshooting(SERVER_VERSION)));
 
   app.get('/self-test', (c) => c.html(renderSelfTest(SERVER_VERSION)));
@@ -634,6 +658,41 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     }),
   );
 
+  // The fidelity mode, from the page or from curl. Applying takes effect on the
+  // next statement: the interceptor reads the mode per statement, not at boot.
+  app.post('/_snowtest/fidelity', async (c) => {
+    let body: { value?: unknown };
+    try {
+      body = (await c.req.json()) as { value?: unknown };
+    } catch {
+      return c.json({ error: 'Send {"value": "off" | "report" | "strict"}.' }, 400);
+    }
+    const value = typeof body.value === 'string' ? body.value.trim().toLowerCase() : '';
+    if (!FIDELITY_MODES.includes(value as (typeof FIDELITY_MODES)[number])) {
+      return c.json({ error: `value must be one of ${FIDELITY_MODES.join(", ")}.` }, 400);
+    }
+    const mode = value as (typeof FIDELITY_MODES)[number];
+    try {
+      const state = await fidelity.apply(mode);
+      return c.json({ ...state, applied: mode, impact: FIDELITY_IMPACT[mode] });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
+    }
+  });
+
+  // Per-model fidelity as the interceptor recorded it: what ran, and what it leaned
+  // on that this stub only approximates.
+  app.get('/_snowtest/models', async (c) => {
+    const models = await engine.fidelityReport();
+    return c.json({
+      fidelity: fidelity.mode,
+      models: models.map((model) => ({
+        ...model,
+        verdict: model.constructs.length > 0 ? 'approximate' : 'verified',
+      })),
+    });
+  });
+
   // One run at a time: the checks write to a fixed scratch database, so two runs
   // at once would collide. A second request while one is in flight is refused.
   let selfTestRunning = false;
@@ -731,6 +790,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
     // A reset is "everything gone", and the timings table is part of everything:
     // it outlives database drops, so it has to be emptied here by name.
     await engine.clearQueryHistory();
+    await engine.clearFidelity();
 
     for (const database of config.databases) {
       catalog.createDatabase(database.name);

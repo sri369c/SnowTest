@@ -12,7 +12,7 @@
  * about a query's shape.
  */
 
-import type { Outcome } from '../sql/meta.js';
+import type { Outcome } from '../sql/outcome.js';
 import type { Session } from '../engine/session.js';
 import { SnowflakeError } from '../sql/errors.js';
 import { toApiV2Rowset, toApiV2RowType, toDriverRowset, toDriverRowType } from './types.js';

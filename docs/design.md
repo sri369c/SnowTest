@@ -82,9 +82,11 @@ handled in one place (`src/http/types.ts`).
 src/
   cli.ts           entry point (dist/cli.js)
   server.ts        HTTP routes, gzip decoding, request/response plumbing
+  interceptor.ts   every statement passes through here: timing, QUERY_HISTORY, fidelity
   config/
     server-config.ts  defaults and environment resolution
     options.ts        flags and environment, shared by --help and /configuration
+    fidelity.ts       the running fidelity mode: pinned by a flag, or saved by the control plane
     version.ts        snowtest current version, read from package.json
   engine/
     engine.ts      DuckDB instance, per-session connections, catalog introspection
@@ -105,6 +107,7 @@ src/
     home.ts        landing page at / (connect, live catalog state, query timings, clear data)
     operations.ts  supported-operations reference at /operations, from data
     usage.ts       /configuration and /troubleshooting pages
+    fidelity.ts    the Fidelity tab: what each mode does, and the control that applies one
     browse.ts      catalog browser at /browse
 .snowtest/         per-instance stage directories created by setup.py
 ```

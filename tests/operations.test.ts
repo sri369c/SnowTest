@@ -25,6 +25,8 @@ const config: SnowtestConfig = {
   verbose: false,
   dataDir: null,
   clock: null,
+  fidelity: 'report',
+  fidelityPinned: false,
 };
 
 const home = (): string =>

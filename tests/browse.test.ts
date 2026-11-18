@@ -28,6 +28,8 @@ const config: SnowtestConfig = {
   verbose: false,
   dataDir: null,
   clock: null,
+  fidelity: 'report',
+  fidelityPinned: false,
 };
 
 describe('cell formatting', () => {

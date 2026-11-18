@@ -199,3 +199,105 @@ describe('timings chart and the hour filter', () => {
     }
   });
 });
+
+describe('fidelity in the timings table', () => {
+  let server: SnowtestServer;
+  beforeAll(async () => {
+    server = await createServer({ dataDir: null });
+  });
+  afterAll(async () => {
+    await server?.close();
+  });
+
+  it('writes the verdict with the row, and NULL when no model sent it', async () => {
+    const statement = `/* {"app": "dbt", "node_id": "model.demo.orders"} */ SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP) AS TS`;
+    expect((await sql(server, statement)).status).toBe(200);
+
+    const model = await rows(
+      server,
+      `SELECT fidelity FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+       WHERE query_text LIKE '%CONVERT_TIMEZONE%'`,
+    );
+    expect(String(model[0][0])).toBe('approximate: CONVERT_TIMEZONE');
+
+    await rows(server, 'SELECT 7 AS PLAIN_TRAFFIC');
+    const plain = await rows(
+      server,
+      `SELECT fidelity FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+       WHERE query_text = 'SELECT 7 AS PLAIN_TRAFFIC'`,
+    );
+    expect(plain[0][0]).toBeNull();
+  });
+
+  it('shows the verdict as a chip on the landing page', async () => {
+    const html = await (await server.app.request('/')).text();
+    expect(html).toContain('<th scope="col">Fidelity</th>');
+    expect(html).toContain('pill-partial');
+    expect(html).toContain('approximate');
+  });
+
+  it('offers a rows dropdown, and "only dbt models" hides everything else', async () => {
+    const all = await (await server.app.request('/')).text();
+    expect(all).toContain('All statements');
+    expect(all).toContain('Only statements from dbt models');
+    expect(all).toContain('PLAIN_TRAFFIC');
+
+    const modelsOnly = await (await server.app.request('/?fidelity=model')).text();
+    expect(modelsOnly).toContain('CONVERT_TIMEZONE');
+    expect(modelsOnly).not.toContain('PLAIN_TRAFFIC');
+    expect(modelsOnly).toContain('came from a dbt model');
+  });
+
+  it('carries the choice through the hour links instead of resetting it', async () => {
+    const from = new Date();
+    from.setMinutes(0, 0, 0);
+    const to = new Date(from.getTime() + 3_600_000);
+    const html = await (
+      await server.app.request(
+        `/?fidelity=model&from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`,
+      )
+    ).text();
+
+    // The dropdown still says "only dbt models"...
+    expect(html).toContain('value="model" selected');
+    // ...the chart's hour links keep it, and the chip's clear link keeps it too.
+    expect(html).toContain('fidelity=model#timings');
+    expect(html).toContain('window=24&fidelity=model#timings');
+  });
+});
+
+describe('how much of the table one page shows', () => {
+  let server: SnowtestServer;
+
+  /** The rows the timings table rendered. */
+  const rowsOn = (html: string): number => (html.match(/<tr><td data-at=/g) ?? []).length;
+
+  beforeAll(async () => {
+    server = await createServer({ dataDir: null });
+    // More than one page, so "50 by default, all of an hour" is observable.
+    for (let i = 0; i < 55; i += 1) {
+      expect((await sql(server, `SELECT ${i} AS BULK`)).status).toBe(200);
+    }
+  });
+  afterAll(async () => {
+    await server?.close();
+  });
+
+  it('shows the latest 50 by default', async () => {
+    const html = await (await server.app.request('/')).text();
+    expect(rowsOn(html)).toBe(50);
+    expect(html).toContain('the latest 50 below');
+  });
+
+  it('shows the whole hour once a timeslot is selected', async () => {
+    const from = new Date();
+    from.setMinutes(0, 0, 0);
+    const to = new Date(from.getTime() + 2 * 3_600_000);
+
+    const html = await (
+      await server.app.request(`/?from=${from.toISOString()}&to=${to.toISOString()}`)
+    ).text();
+    expect(rowsOn(html)).toBe(55);
+    expect(html).toContain('all of them below');
+  });
+});
