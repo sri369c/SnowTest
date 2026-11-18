@@ -2,8 +2,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { rewrite } from '../src/dialect.js';
-import { SnowflakeError } from '../src/errors.js';
+import { rewrite } from '../src/sql/dialect.js';
+import { SnowflakeError } from '../src/sql/errors.js';
 
 const ctx = {
   database: 'SNOWTEST',

@@ -9,7 +9,7 @@
  * imported by every page renderer, keeps them from drifting apart.
  */
 
-import { PACKAGE_VERSION } from './version.js';
+import { PACKAGE_VERSION } from '../config/version.js';
 
 /** Escape text for HTML text nodes and attribute values. */
 export function escapeHtml(value: string): string {

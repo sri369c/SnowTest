@@ -11,7 +11,7 @@
 
 import { HOME_TABS } from './home.js';
 import { escapeHtml, renderPage, renderTabLinks } from './page.js';
-import { SERVER_VERSION } from './protocol.js';
+import { SERVER_VERSION } from '../http/protocol.js';
 
 /** Rows shown per preview. Small enough to stay a glance, not a table dump. */
 export const PREVIEW_LIMIT = 50;

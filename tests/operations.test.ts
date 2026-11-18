@@ -2,10 +2,10 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { SnowtestConfig } from '../src/config.js';
-import { renderHome } from '../src/home.js';
-import { GROUPS, LANDING_SURFACES, UNSUPPORTED, renderOperations } from '../src/operations.js';
-import { escapeHtml, inlineMarkup } from '../src/page.js';
+import type { SnowtestConfig } from '../src/config/server-config.js';
+import { renderHome } from '../src/pages/home.js';
+import { GROUPS, LANDING_SURFACES, UNSUPPORTED, renderOperations } from '../src/pages/operations.js';
+import { escapeHtml, inlineMarkup } from '../src/pages/page.js';
 
 const STATUSES = new Set(['supported', 'partial', 'unsupported']);
 

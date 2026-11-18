@@ -48,12 +48,12 @@ flowchart LR
     D["Driver protocol<br/>/session/v1/* /queries/v1/*"]
     A["SQL API v2<br/>/api/v2/statements"]
     C["Control plane<br/>/_snowtest/*"]
-    R["StatementRouter<br/>src/meta.ts"]
-    X["Dialect rewrite<br/>src/dialect.ts"]
+    R["StatementRouter<br/>src/sql/meta.ts"]
+    X["Dialect rewrite<br/>src/sql/dialect.ts"]
     E[("DuckDB engine<br/>one catalog per database")]
     CAT["Catalog<br/>db / schema / warehouse / role"]
     FS[("Stage directories<br/>on local disk")]
-    ENC["Wire encoders<br/>src/types.ts + protocol.ts"]
+    ENC["Wire encoders<br/>src/http/types.ts + protocol.ts"]
   end
 
   PY --> D
@@ -74,39 +74,38 @@ flowchart LR
 Three surfaces over one statement router. Both result formats are built from the
 same `Outcome`, so the driver protocol and the SQL API can never disagree about a
 query's shape — they only disagree about *how a value is spelled*, which is
-handled in one place (`src/types.ts`).
+handled in one place (`src/http/types.ts`).
 
 ### Layout
 
 ```
-src/server.ts      HTTP routes, gzip decoding, request/response plumbing
-src/meta.ts        statement router: metadata/side-effecting SQL vs DuckDB
-src/dialect.ts     Snowflake → DuckDB translation
-src/engine.ts      DuckDB instance, per-session connections, catalog introspection
-src/persist.ts     SNOWTEST_DATA_DIR: one DuckDB file per database, stage definitions
-src/types.ts       type mapping + per-surface row encoding
-src/protocol.ts    response envelopes (driver vs SQL API v2)
-src/home.ts        landing page at / (connect, live catalog state, query timings, clear data)
-src/operations.ts  supported-operations reference at /operations, from data
-src/usage.ts       /configuration and /troubleshooting pages
-src/selfcheck.ts   /self-test: checks run through the server's own HTTP surface
-src/browse.ts      catalog browser at /browse
-src/page.ts        shared HTML shell and stylesheet
-src/stage.ts       stage directories on disk (PUT/GET/LIST/COPY INTO backing)
-src/catalog.ts     databases, schemas, warehouses, roles, stages
-src/session.ts     per-connection session state and parameters
-src/errors.ts      Snowflake-shaped errors (code + SQLSTATE + kind)
-src/options.ts     flags and environment, shared by --help and /configuration
-src/config.ts      defaults and environment resolution
-src/version.ts     snowtest's own version, read from package.json
-src/cli.ts         entry point
-setup.py           container lifecycle: up, redeploy, down, status, logs, reset, build
-compose.yaml       container service definition
-Dockerfile         container image build
-data/              sample dataset (examples.sql)
-tests/             vitest units, Python connector suite, dbt suite
-scripts/           debugging helpers
-docs/              this document
+src/
+  cli.ts           entry point (dist/cli.js)
+  server.ts        HTTP routes, gzip decoding, request/response plumbing
+  config/
+    server-config.ts  defaults and environment resolution
+    options.ts        flags and environment, shared by --help and /configuration
+    version.ts        snowtest current version, read from package.json
+  engine/
+    engine.ts      DuckDB instance, per-session connections, catalog introspection
+    catalog.ts     databases, schemas, warehouses, roles, stages
+    session.ts     per-connection session state and parameters
+    persist.ts     SNOWTEST_DATA_DIR: one DuckDB file per database, stage definitions
+  sql/
+    meta.ts        statement router: metadata/side-effecting SQL vs DuckDB
+    dialect.ts     Snowflake to DuckDB translation rules
+    errors.ts      Snowflake-shaped errors (code + SQLSTATE + kind)
+    stage.ts       stage directories on disk (PUT/GET/LIST/COPY INTO backing)
+  http/
+    protocol.ts    response envelopes (driver vs SQL API v2)
+    types.ts       type mapping + per-surface row encoding
+    selfcheck.ts   /self-test: checks run through the server HTTP surface
+  pages/
+    page.ts        shared HTML shell and stylesheet
+    home.ts        landing page at / (connect, live catalog state, query timings, clear data)
+    operations.ts  supported-operations reference at /operations, from data
+    usage.ts       /configuration and /troubleshooting pages
+    browse.ts      catalog browser at /browse
 .snowtest/         per-instance stage directories created by setup.py
 ```
 
@@ -279,7 +278,7 @@ fails with `… is not supported on snowtest` (`002003`, SQLSTATE `0A000`).
 | String literals | Snowflake backslash escapes decoded (`\'`, `\\`, `\n`, `\t`, `\xhh`, `\uhhhh`, octal) and re-emitted as a DuckDB literal; NUL refused |
 | DDL decoration | `TRANSIENT`, `CLUSTER BY`, `COPY GRANTS`, `DATA_RETENTION_TIME_IN_DAYS`, `CHANGE_TRACKING` |
 
-Statements the router handles before translation (`src/meta.ts`):
+Statements the router handles before translation (`src/sql/meta.ts`):
 
 | Statement | Handling |
 |---|---|
@@ -472,20 +471,20 @@ the exit trap only stops a process the runner started.
 
 Everything a statement can hit, whether a refused statement, a partial type or a
 gap in a function, is on the **Not supported** tab of `/operations`, which is
-generated from `src/operations.ts`. This list stops at the limits that have no
+generated from `src/pages/operations.ts`. This list stops at the limits that have no
 statement to hang on.
 
 ---
 
 ## 13. Extension points
 
-- **New SQL function** → add a `replaceCall(...)` rule in `src/dialect.ts`; it is
+- **New SQL function** → add a `replaceCall(...)` rule in `src/sql/dialect.ts`; it is
   masked-aware and never fires inside literals.
 - **New `SHOW` variant** → extend the regex and add a `case` in
   `StatementRouter.handleShow`, returning `syntheticOutcome(specs, rows)`.
 - **New endpoint** → add a Hono route in `src/server.ts`; both metadata and
   results already flow through the router.
 - **New wire type** → map it in `toSnowflakeType` and encode it in
-  `driverValue` (`src/types.ts`) with the surface's spelling.
-- **New stage capability** → `src/stage.ts` owns the filesystem; the SQL side is
+  `driverValue` (`src/http/types.ts`) with the surface's spelling.
+- **New stage capability** → `src/sql/stage.ts` owns the filesystem; the SQL side is
   in `handlePut` / `handleGet` / `handleCopyInto`.

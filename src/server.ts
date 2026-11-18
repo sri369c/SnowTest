@@ -17,9 +17,9 @@ import { gunzipSync, inflateSync } from 'node:zlib';
 
 import { Hono, type Context } from 'hono';
 
-import { Catalog, normalizeName } from './catalog.js';
-import { loadConfig, type SnowtestConfig } from './config.js';
-import { Engine, quoteIdent, type EngineConnection } from './engine.js';
+import { Catalog, normalizeName } from './engine/catalog.js';
+import { loadConfig, type SnowtestConfig } from './config/server-config.js';
+import { Engine, quoteIdent, type EngineConnection } from './engine/engine.js';
 import {
   SnowflakeError,
   authError,
@@ -27,27 +27,27 @@ import {
   mapEngineError,
   protocolError,
   sessionExpired,
-} from './errors.js';
+} from './sql/errors.js';
 import {
   PREVIEW_LIMIT,
   renderMissing,
   renderPreview,
   renderSchema,
   type BrowseTable,
-} from './browse.js';
+} from './pages/browse.js';
 import {
   renderHome,
   type HomeDatabaseState,
   type HomeFilterState,
   type HomeQueryState,
   type HomeVolumeState,
-} from './home.js';
-import { renderOperations } from './operations.js';
-import { renderSelfTest, runSelfChecks } from './selfcheck.js';
-import { renderConfiguration, renderTroubleshooting } from './usage.js';
-import { PACKAGE_VERSION } from './version.js';
-import { StatementRouter, type Outcome } from './meta.js';
-import { DataDir } from './persist.js';
+} from './pages/home.js';
+import { renderOperations } from './pages/operations.js';
+import { renderSelfTest, runSelfChecks } from './http/selfcheck.js';
+import { renderConfiguration, renderTroubleshooting } from './pages/usage.js';
+import { PACKAGE_VERSION } from './config/version.js';
+import { StatementRouter, type Outcome } from './sql/meta.js';
+import { DataDir } from './engine/persist.js';
 import {
   SERVER_VERSION,
   driverErrorResponse,
@@ -58,9 +58,9 @@ import {
   sqlApiResult,
   successEnvelope,
   tokenResponse,
-} from './protocol.js';
-import { Session, SessionRegistry } from './session.js';
-import { StageStore } from './stage.js';
+} from './http/protocol.js';
+import { Session, SessionRegistry } from './engine/session.js';
+import { StageStore } from './sql/stage.js';
 
 interface StoredStatement {
   outcome: Outcome;
@@ -496,7 +496,7 @@ export async function createServer(overrides: Partial<SnowtestConfig> = {}): Pro
   });
 
   // The reference the landing page links to. Static content, rendered from
-  // `src/operations.ts` so the summary on `/` and this page share one source.
+  // `src/pages/operations.ts` so the summary on `/` and this page share one source.
   app.get('/operations', (c) => c.html(renderOperations(SERVER_VERSION)));
 
   // Flags and environment rendered from the same option table the CLI prints in

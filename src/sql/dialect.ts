@@ -15,7 +15,7 @@
  * faithfully (an unknown format element, say) raises `unsupported()`.
  */
 
-import { normalizeName, type DatabaseDef } from './catalog.js';
+import { normalizeName, type DatabaseDef } from '../engine/catalog.js';
 import { compilationError, noCurrentContext, unsupported } from './errors.js';
 
 export interface RewriteContext {

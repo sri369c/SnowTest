@@ -10,7 +10,7 @@
  */
 
 import { Catalog, normalizeName } from './catalog.js';
-import type { Clock } from './config.js';
+import type { Clock } from '../config/server-config.js';
 
 export interface SessionParameter {
   name: string;

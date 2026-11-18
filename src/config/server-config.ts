@@ -4,7 +4,7 @@
 
 import { readFileSync } from 'node:fs';
 
-import { normalizeName } from './catalog.js';
+import { normalizeName } from '../engine/catalog.js';
 
 /** `SNOWTEST_CLOCK`: a frozen instant, or an offset that keeps moving. */
 export type Clock = { kind: 'fixed'; at: Date } | { kind: 'offset'; ms: number };

@@ -8,9 +8,9 @@ import {
   renderMissing,
   renderPreview,
   renderSchema,
-} from '../src/browse.js';
-import type { SnowtestConfig } from '../src/config.js';
-import { HOME_TABS, renderHome } from '../src/home.js';
+} from '../src/pages/browse.js';
+import type { SnowtestConfig } from '../src/config/server-config.js';
+import { HOME_TABS, renderHome } from '../src/pages/home.js';
 
 const config: SnowtestConfig = {
   port: 3030,

@@ -14,9 +14,9 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
-import { Catalog, normalizeName } from './catalog.js';
+import { Catalog, normalizeName } from '../engine/catalog.js';
 import { rewrite, splitColumnListCtas, toSqlLiteral, type ColumnListCtas } from './dialect.js';
-import { Engine, quoteIdent, type EngineConnection, type QueryResult, type SequenceInfo } from './engine.js';
+import { Engine, quoteIdent, type EngineConnection, type QueryResult, type SequenceInfo } from '../engine/engine.js';
 import {
   SnowflakeError,
   compilationError,
@@ -25,10 +25,10 @@ import {
   objectNotFound,
   unsupported,
 } from './errors.js';
-import type { DataDir } from './persist.js';
-import type { Session } from './session.js';
+import type { DataDir } from '../engine/persist.js';
+import type { Session } from '../engine/session.js';
 import { StageStore } from './stage.js';
-import { formatTimestamp, toSnowflakeType, toSnowflakeTypeName, type SnowflakeColumn } from './types.js';
+import { formatTimestamp, toSnowflakeType, toSnowflakeTypeName, type SnowflakeColumn } from '../http/types.js';
 
 export interface Outcome {
   columns: SnowflakeColumn[];

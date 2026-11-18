@@ -20,7 +20,7 @@ import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
-import { renderPage } from './page.js';
+import { renderPage } from '../pages/page.js';
 
 export interface SelfCheckResult {
   name: string;

@@ -4,10 +4,10 @@
 /** Command-line entry point: `snowtest [--port 8080]`. */
 
 import { createServer } from './server.js';
-import { loadConfig, parsePort, type SnowtestConfig } from './config.js';
-import { OPTIONS, helpText } from './options.js';
-import { SERVER_VERSION } from './protocol.js';
-import { PACKAGE_VERSION } from './version.js';
+import { loadConfig, parsePort, type SnowtestConfig } from './config/server-config.js';
+import { OPTIONS, helpText } from './config/options.js';
+import { SERVER_VERSION } from './http/protocol.js';
+import { PACKAGE_VERSION } from './config/version.js';
 
 function fail(message: string): never {
   console.error(`snowtest: ${message}\nRun 'snowtest --help' for the list of flags.`);

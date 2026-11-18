@@ -10,7 +10,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createServer, type SnowtestServer } from '../src/server.js';
-import { PACKAGE_VERSION } from '../src/version.js';
+import { PACKAGE_VERSION } from '../src/config/version.js';
 
 interface Envelope<T> {
   success: boolean;

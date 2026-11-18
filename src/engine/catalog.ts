@@ -10,7 +10,7 @@
  * by a test is visible to `SHOW TABLES` immediately, with no sync step.
  */
 
-import { objectNotFound } from './errors.js';
+import { objectNotFound } from '../sql/errors.js';
 
 export interface SchemaDef {
   name: string;

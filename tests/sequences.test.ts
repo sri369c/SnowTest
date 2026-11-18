@@ -2,7 +2,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { rewrite } from '../src/dialect.js';
+import { rewrite } from '../src/sql/dialect.js';
 import { createServer, type SnowtestServer } from '../src/server.js';
 
 interface ApiResult {

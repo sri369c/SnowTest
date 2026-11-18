@@ -7,8 +7,8 @@ import { pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { DEFAULTS, loadConfig, parseClock, parsePort } from '../src/config.js';
-import { PACKAGE_VERSION, readPackageVersion } from '../src/version.js';
+import { DEFAULTS, loadConfig, parseClock, parsePort } from '../src/config/server-config.js';
+import { PACKAGE_VERSION, readPackageVersion } from '../src/config/version.js';
 
 const saved = { ...process.env };
 afterEach(() => {

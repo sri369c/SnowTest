@@ -13,10 +13,10 @@ import { fileURLToPath } from 'node:url';
 
 /**
  * Read the manifest at runtime rather than duplicating the number in source.
- * `src/` and `dist/` both sit one level below the package root, and the image
+ * `src/config/` and `dist/config/` both sit two levels below the package root, and the image
  * copies `package.json` next to `dist/`. Throws if it is unreadable, not JSON, or has no version.
  */
-export function readPackageVersion(manifestUrl: URL = new URL('../package.json', import.meta.url)): string {
+export function readPackageVersion(manifestUrl: URL = new URL('../../package.json', import.meta.url)): string {
   const path = fileURLToPath(manifestUrl);
   let text: string;
   try {

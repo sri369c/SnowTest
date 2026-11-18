@@ -13,7 +13,7 @@
  * JSON numbers mostly works but loses 38-digit precision, so we stringify.
  */
 
-import { SnowflakeError } from './errors.js';
+import { SnowflakeError } from '../sql/errors.js';
 
 export interface SnowflakeColumn {
   name: string;
