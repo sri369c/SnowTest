@@ -6,7 +6,7 @@
 import { createServer } from './server.js';
 import { loadConfig, parsePort, type SnowtestConfig } from './config.js';
 import { OPTIONS, helpText } from './options.js';
-import { SERVER_VERSION } from './protocol.js';
+import { SERVER_VERSION } from './http/protocol.js';
 import { PACKAGE_VERSION } from './version.js';
 
 function fail(message: string): never {

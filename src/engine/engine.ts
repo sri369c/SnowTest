@@ -20,8 +20,8 @@ import { join } from 'node:path';
 
 import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
 
-import { toSqlLiteral } from './dialect.js';
-import { mapEngineError, sessionExpired } from './errors.js';
+import { toSqlLiteral } from '../sql/dialect.js';
+import { mapEngineError, sessionExpired } from '../sql/errors.js';
 import type { DataDir } from './persist.js';
 
 export interface RawColumn {

@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { GROUPS } from '../src/operations.js';
+import { GROUPS } from '../src/pages/operations.js';
 
 const SEMVER = /^\d+\.\d+\.\d+$/;
 

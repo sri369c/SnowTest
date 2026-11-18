@@ -65,7 +65,7 @@ describe('§12 known limitations', () => {
   it('sends statement-level gaps to the reference instead of restating them', () => {
     expect(limits).toContain('/operations');
     expect(limits).toContain('Not supported');
-    expect(limits).toContain('src/operations.ts');
+    expect(limits).toContain('src/pages/operations.ts');
   });
 
   it('names no gap the operations table already owns', () => {

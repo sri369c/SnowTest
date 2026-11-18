@@ -7,11 +7,11 @@ import { dirname, join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { SnowflakeError } from '../src/errors.js';
-import { failAfter, StatementRouter } from '../src/meta.js';
+import { SnowflakeError } from '../src/sql/errors.js';
+import { failAfter, StatementRouter } from '../src/sql/meta.js';
 import { createServer, type SnowtestServer } from '../src/server.js';
-import { Session } from '../src/session.js';
-import { toApiV2Rowset, toDriverRowset, type SnowflakeColumn } from '../src/types.js';
+import { Session } from '../src/engine/session.js';
+import { toApiV2Rowset, toDriverRowset, type SnowflakeColumn } from '../src/http/types.js';
 
 interface ApiResult {
   status: number;

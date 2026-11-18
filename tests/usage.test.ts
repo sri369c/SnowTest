@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { DEFAULTS } from '../src/config.js';
 import { ENV_ONLY, OPTIONS, helpText } from '../src/options.js';
-import { renderConfiguration, renderTroubleshooting } from '../src/usage.js';
+import { renderConfiguration, renderTroubleshooting } from '../src/pages/usage.js';
 
 describe('option table', () => {
   it('lists every flag once', () => {

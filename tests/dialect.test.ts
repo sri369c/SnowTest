@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { rewrite, splitColumnListCtas, toSqlLiteral } from '../src/dialect.js';
+import { rewrite, splitColumnListCtas, toSqlLiteral } from '../src/sql/dialect.js';
 
 const ctx = {
   database: 'SNOWTEST',

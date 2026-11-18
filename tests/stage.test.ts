@@ -13,7 +13,7 @@ import { join, sep } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { StageStore } from '../src/stage.js';
+import { StageStore } from '../src/sql/stage.js';
 
 let root: string;
 let store: StageStore;

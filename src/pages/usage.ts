@@ -13,7 +13,7 @@
  * observe: the launcher, the control plane, staging, and troubleshooting.
  */
 
-import { ENV_ONLY, OPTIONS } from './options.js';
+import { ENV_ONLY, OPTIONS } from '../options.js';
 import { escapeHtml, inlineMarkup, renderPage, renderTabs } from './page.js';
 
 const dash = '<span class="null">—</span>';

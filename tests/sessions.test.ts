@@ -8,9 +8,9 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { EngineConnection } from '../src/engine.js';
+import type { EngineConnection } from '../src/engine/engine.js';
 import { createServer, type SnowtestServer } from '../src/server.js';
-import { SESSION_IDLE_MS } from '../src/session.js';
+import { SESSION_IDLE_MS } from '../src/engine/session.js';
 
 interface LoginData {
   token: string;
