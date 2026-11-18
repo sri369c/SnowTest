@@ -9,6 +9,9 @@ import { normalizeName } from '../engine/catalog.js';
 /** `SNOWTEST_CLOCK`: a frozen instant, or an offset that keeps moving. */
 export type Clock = { kind: 'fixed'; at: Date } | { kind: 'offset'; ms: number };
 
+/** `off` does no fidelity work, `report` records, `strict` refuses approximate SQL. */
+export type FidelityMode = 'off' | 'report' | 'strict';
+
 export interface SnowtestConfig {
   port: number;
   host: string;
@@ -36,6 +39,10 @@ export interface SnowtestConfig {
   dataDir: string | null;
   /** Emulated clock; null uses the host clock. */
   clock: Clock | null;
+  /** What the interceptor does with fidelity notes: nothing, report them, or refuse. */
+  fidelity: FidelityMode;
+  /** True when --fidelity or SNOWTEST_FIDELITY fixed the mode at start-up. */
+  fidelityPinned: boolean;
 }
 
 /** Baseline values; `--help` and the `/configuration` page render these as the defaults. */
@@ -55,7 +62,18 @@ export const DEFAULTS: SnowtestConfig = {
   verbose: false,
   dataDir: null,
   clock: null,
+  fidelity: 'report',
+  fidelityPinned: false,
 };
+
+/** `off`, `report` or `strict`. A typo is a startup error, not a silent default. */
+export function parseFidelity(value: string | undefined): FidelityMode {
+  const text = (value ?? '').trim().toLowerCase();
+  if (text === '' || text === 'report') return 'report';
+  if (text === 'off') return 'off';
+  if (text === 'strict') return 'strict';
+  throw new Error(`SNOWTEST_FIDELITY must be off, report or strict, got '${value}'.`);
+}
 
 /** A TCP port, 1–65535, or 0 to let the OS pick a free one. Anything else is a startup error. */
 export function parsePort(value: string, source: string): number {
@@ -146,6 +164,7 @@ export function loadConfig(overrides: Partial<SnowtestConfig> = {}): SnowtestCon
     verbose: readBoolean(env.SNOWTEST_VERBOSE, 'SNOWTEST_VERBOSE'),
     dataDir: env.SNOWTEST_DATA_DIR || DEFAULTS.dataDir,
     clock: parseClock(env.SNOWTEST_CLOCK),
+    fidelity: parseFidelity(env.SNOWTEST_FIDELITY),
     ...overrides,
   };
 
@@ -153,6 +172,15 @@ export function loadConfig(overrides: Partial<SnowtestConfig> = {}): SnowtestCon
   if (users) config.users = users;
   if (overrides.jwtPublicKey !== undefined) config.jwtPublicKey = overrides.jwtPublicKey;
   if (overrides.databases) config.databases = overrides.databases;
+
+  // A flag value reaches here as an unparsed string, so the same check runs again:
+  // a typo has to fail the start-up rather than quietly fall back to report.
+  config.fidelity = parseFidelity(config.fidelity);
+
+  // A flag or an exported variable is a pin: the configuration page refuses to
+  // override it rather than saving a value that could never take effect.
+  config.fidelityPinned =
+    overrides.fidelityPinned ?? (Boolean(env.SNOWTEST_FIDELITY) || overrides.fidelity !== undefined);
 
   // Identifiers become canonical keys here, once; nothing downstream re-folds them.
   config.defaultDatabase = normalizeName(config.defaultDatabase);

@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 import { Catalog, normalizeName } from '../engine/catalog.js';
-import { rewrite, splitColumnListCtas, toSqlLiteral, type ColumnListCtas } from './dialect.js';
+import { rewrite, splitColumnListCtas, toSqlLiteral, type ApproximationSink, type ColumnListCtas, type RewriteContext } from './dialect.js';
 import type { Outcome } from './outcome.js';
 import { Engine, quoteIdent, type EngineConnection, type QueryResult, type SequenceInfo } from '../engine/engine.js';
 import {
@@ -28,8 +28,9 @@ import {
 } from './errors.js';
 import type { DataDir } from '../engine/persist.js';
 import type { Session } from '../engine/session.js';
+import type { FidelityMode } from '../config/server-config.js';
 import { StageStore } from './stage.js';
-import { StatementInterceptor } from '../interceptor.js';
+import { StatementInterceptor, nodeIdOf, type ExecuteOptions } from '../interceptor.js';
 import { formatTimestamp, toSnowflakeType, toSnowflakeTypeName, type SnowflakeColumn } from '../http/types.js';
 
 
@@ -440,9 +441,6 @@ function likeMatcher(pattern: string | null): (value: string) => boolean {
   return (value: string) => regex.test(value);
 }
 
-export interface ExecuteOptions {
-  bindings?: unknown[];
-}
 
 /** Canonical form of a possibly-qualified object name, as SQL text supplies it. */
 function canonicalName(raw: string): string {
@@ -463,8 +461,10 @@ export class StatementRouter {
     private readonly dataDir: DataDir | null = null,
     /** Called after a database is dropped, so the server can clear every session's context. */
     private readonly onDatabaseDropped: (database: string) => void = () => {},
+    /** Read per statement, so a changed mode lands on the next query. */
+    private readonly fidelityMode: () => FidelityMode = () => 'report',
   ) {
-    this.interceptor = new StatementInterceptor(engine, catalog);
+    this.interceptor = new StatementInterceptor(engine, catalog, fidelityMode);
   }
 
   private async connectionFor(session: Session): Promise<EngineConnection> {
@@ -484,7 +484,14 @@ export class StatementRouter {
       return statusOutcome('Statement executed successfully.', STATEMENT_TYPES.select);
     }
 
-    return this.interceptor.run(statement, session, () => this.route(statement, session, options));
+    return this.interceptor.run({
+      statement,
+      // Read before stripping: the dbt query comment is the only thing that names the model.
+      nodeId: nodeIdOf(sql),
+      session,
+      route: (notes) => this.route(statement, session, notes ? { ...options, notes } : options),
+      translate: (notes) => this.translateOnly(statement, session, options, notes),
+    });
   }
 
   /** One statement, routed. `execute` wraps this so every statement is timed and noted. */
@@ -2475,22 +2482,33 @@ export class StatementRouter {
   ): Promise<QueryResult> {
     const translated = rewrite(
       statement,
-      {
-        database: session.database,
-        schema: session.schema,
-        role: session.role,
-        user: session.user,
-        warehouse: session.warehouse,
-        databases: [...this.catalog.databases.values()],
-        clockMs: session.clockMs(),
-      },
+      this.rewriteContext(session),
       options.bindings ?? [],
+      options.notes,
     );
     try {
       return await connection.execute(translated);
     } catch (error) {
       throw missingContext(error, statement, session) ?? error;
     }
+
+  }
+  /** Session-scoped translation context: one place, so a dry pass cannot drift from the real one. */
+  private rewriteContext(session: Session): RewriteContext {
+    return {
+      database: session.database,
+      schema: session.schema,
+      role: session.role,
+      user: session.user,
+      warehouse: session.warehouse,
+      databases: [...this.catalog.databases.values()],
+      clockMs: session.clockMs(),
+    };
+  }
+
+  /** Translate without executing, so `strict` can refuse before anything runs. */
+  private translateOnly(statement: string, session: Session, options: ExecuteOptions, notes: ApproximationSink): void {
+    rewrite(statement, this.rewriteContext(session), options.bindings ?? [], notes);
   }
 }
 

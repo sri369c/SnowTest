@@ -90,6 +90,12 @@ const HISTORY_DATABASE = 'SNOWFLAKE';
 const HISTORY_SCHEMA = 'ACCOUNT_USAGE';
 const HISTORY_TABLE = 'QUERY_HISTORY';
 const HISTORY_SEQUENCE = 'QUERY_HISTORY_SEQ';
+/**
+ * Model fidelity, one row per statement per construct it approximated. Append-only
+ * like query history: the report aggregates, and a reset empties it.
+ */
+const FIDELITY_TABLE = 'MODEL_FIDELITY';
+const FIDELITY_SEQUENCE = 'MODEL_FIDELITY_SEQ';
 /** Not `.duckdb`: DataDir restores every `.duckdb` file as a user database, and this is not one. */
 const HISTORY_FILE = 'query_history.db';
 
@@ -246,6 +252,17 @@ export class Engine {
          rows_produced BIGINT
        )`,
     );
+    await this.admin.run(
+      `CREATE SEQUENCE IF NOT EXISTS ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_SEQUENCE} START 1`,
+    );
+    await this.admin.run(
+      `CREATE TABLE IF NOT EXISTS ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_TABLE} (
+         statement_id BIGINT NOT NULL,
+         node_id VARCHAR NOT NULL,
+         construct VARCHAR NOT NULL,
+         recorded_at TIMESTAMP
+       )`,
+    );
   }
 
   /**
@@ -274,6 +291,50 @@ export class Engine {
               ${value(record.totalElapsedTime)}, ${value(record.rowsProduced)}
        FROM n`,
     );
+  }
+
+  /**
+   * Note what one statement did for model fidelity: the dbt node it came from and
+   * every construct the translation only approximated. A clean statement writes a
+   * single row with an empty construct, which is what keeps statement counts
+   * honest when a model approximates nothing.
+   */
+  async recordFidelity(statement: { nodeId: string | null; constructs: string[] }): Promise<void> {
+    if (!statement.nodeId) return;
+    const target = `${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_TABLE}`;
+    const [seed] = await this.queryOnAdmin(
+      `SELECT nextval('${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_SEQUENCE}')`,
+    );
+    const statementId = String(seed?.[0] ?? 0);
+    const constructs = statement.constructs.length > 0 ? statement.constructs : [''];
+    for (const construct of constructs) {
+      await this.admin.run(
+        `INSERT INTO ${target} (statement_id, node_id, construct, recorded_at)
+         VALUES (${statementId}, ${toSqlLiteral(statement.nodeId)}, ${toSqlLiteral(construct)}, current_timestamp)`,
+      );
+    }
+  }
+
+  /** Per-model fidelity as the report shows it: statements seen, constructs approximated. */
+  async fidelityReport(): Promise<Array<{ nodeId: string; statements: number; constructs: string[]; lastSeen: string | null }>> {
+    const target = `${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_TABLE}`;
+    const rows = await this.queryOnAdmin(
+      `SELECT node_id, count(DISTINCT statement_id),
+              string_agg(DISTINCT construct, ', ') FILTER (WHERE construct <> ''),
+              max(recorded_at)
+       FROM ${target} GROUP BY node_id ORDER BY node_id`,
+    );
+    return rows.map((row) => ({
+      nodeId: String(row[0]),
+      statements: Number(row[1] ?? 0),
+      constructs: row[2] ? String(row[2]).split(', ') : [],
+      lastSeen: row[3] ? String(row[3]) : null,
+    }));
+  }
+
+  /** Empty the ledger, for a reset that promises a clean account. */
+  async clearFidelity(): Promise<void> {
+    await this.admin.run(`DELETE FROM ${HISTORY_DATABASE}.${HISTORY_SCHEMA}.${FIDELITY_TABLE}`);
   }
 
   /** How many statements the table holds, for the Clear Data tab. */

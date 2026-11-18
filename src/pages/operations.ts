@@ -176,6 +176,12 @@ export const GROUPS: OperationGroup[] = [
       { syntax: 'GET /', behaviour: 'The landing page: what this is, and how to connect.', status: 'supported', since: '1.0.0' },
       { syntax: 'GET /operations', behaviour: 'This page.', status: 'supported', since: '1.0.0' },
       {
+        syntax: 'GET /settings',
+        behaviour: 'The settings that can be changed while the server runs: the model-fidelity mode, with what each one does, a dropdown and an apply button. `POST /_snowtest/fidelity` is the same change from curl.',
+        status: 'supported',
+        since: '5.0.0',
+      },
+      {
         syntax: 'GET /configuration',
         behaviour: 'Flags and environment, the launcher, the control plane and staging, for the running build. `GET /usage` redirects here.',
         status: 'supported',
@@ -211,6 +217,20 @@ export const GROUPS: OperationGroup[] = [
         behaviour: 'Databases, schemas, warehouses, roles, stages and session count.',
         status: 'supported',
         since: '1.0.0',
+      },
+      {
+        syntax: 'POST /_snowtest/fidelity',
+        behaviour:
+          'Sets the model-fidelity mode from `{"value": "off" | "report" | "strict"}`. Applied per statement, so the next query uses it; saved in `settings.json` when the server has a data directory. Refused while `--fidelity` or `SNOWTEST_FIDELITY` pins the mode.',
+        status: 'supported',
+        since: '5.0.0',
+      },
+      {
+        syntax: 'GET /_snowtest/models',
+        behaviour:
+          'Per-model fidelity: the mode in force, and for each dbt model the statements seen, the constructs approximated and a `verified` or `approximate` verdict.',
+        status: 'supported',
+        since: '5.0.0',
       },
       {
         syntax: 'POST /_snowtest/seed',

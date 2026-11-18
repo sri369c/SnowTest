@@ -16,6 +16,13 @@ export class SnowflakeError extends Error {
   readonly sqlState: string;
   readonly kind: ErrorKind;
 
+  /**
+   * Set when the refusal is a limit of this stub rather than a mistake in the
+   * client SQL. The caller can then say "snowtest cannot answer that" instead of
+   * handing over a compile error that accuses the query.
+   */
+  snowtestLimit: string | null = null;
+
   constructor(code: string, message: string, sqlState = '42000', kind: ErrorKind = 'compile') {
     super(message);
     this.name = 'SnowflakeError';
@@ -49,12 +56,15 @@ export function objectNotFound(kind: string, name: string, code: '002003' | '002
 
 /** Snowflake syntax snowtest recognises but cannot emulate faithfully. */
 export function unsupported(feature: string): SnowflakeError {
-  return new SnowflakeError(
+  const error = new SnowflakeError(
     '002003',
-    `SQL compilation error:\n${feature} is not supported on snowtest.`,
+    `SQL compilation error:
+${feature} is not supported on snowtest.`,
     '0A000',
     'compile',
   );
+  error.snowtestLimit = feature;
+  return error;
 }
 
 /** `090105` / `090106` — an unqualified name with no current database / schema. */

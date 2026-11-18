@@ -35,6 +35,17 @@ export interface RewriteContext {
   clockMs?: number;
 }
 
+/**
+ * One place a translation substitutes an approximation of Snowflake for
+ * Snowflake. Only genuine divergences are reported: `IFF` as `CASE`, `NVL2`,
+ * `ZEROIFNULL`, `DIV0` and `QUALIFY` (which DuckDB answers itself) are faithful,
+ * and warning about those would teach a reader to ignore the warnings that matter.
+ */
+export type Approximation = { feature: string; detail: string };
+
+/** Collects approximations while one statement is translated. */
+export type ApproximationSink = (approximation: Approximation) => void;
+
 /** Placeholder marker for text we must not touch (string literals, comments). */
 const MARK = '\u0001';
 /** Placeholder marker for double-quoted identifiers. */
@@ -730,7 +741,7 @@ function jsonPath(step: string, parts: string[]): string {
 }
 
 /** `src:path` → `json_extract(src, '$.path')`; `src` is a name, quoted name or call (not a string: `{'k': v}`). */
-function variantPaths(sql: string, parts: string[], literal: Literal): string {
+function variantPaths(sql: string, parts: string[], literal: Literal, approximations?: ApproximationSink): string {
   const step = new RegExp(String.raw`(?<!:)\s*:\s*(${KEY}(?:\.${KEY}|\[\d+\])*)`, 'g');
   let out = sql;
   for (let match = step.exec(out); match; match = step.exec(out)) {
@@ -744,6 +755,7 @@ function variantPaths(sql: string, parts: string[], literal: Literal): string {
       throw unsupported(`A variant path after a :: cast (':${unmask(match[1], parts)}') (parenthesise the cast)`);
     }
     if (start < 0) continue;
+    approximations?.({ feature: 'variant path', detail: "translated to json_extract: Snowflake's variant typing is not reproduced" });
     const path = literal(toSqlLiteral(jsonPath(match[1], parts)));
     const replacement = `json_extract(${out.slice(start, end)}, ${path})`;
     out = out.slice(0, start) + replacement + out.slice(end + match[0].length);
@@ -1022,7 +1034,7 @@ const FLATTEN_ARGUMENTS = new Set(['INPUT', 'PATH', 'OUTER', 'MODE', 'RECURSIVE'
  * back, and a wrong row count is exactly the failure this server exists to make
  * visible.
  */
-function flattenCalls(sql: string, parts: string[], literal: (value: string) => string): string {
+function flattenCalls(sql: string, parts: string[], literal: (value: string) => string, approximations?: ApproximationSink): string {
   const str = (value: string) => literal(toSqlLiteral(value));
   const closeBracket = str(']');
   let out = sql;
@@ -1030,6 +1042,7 @@ function flattenCalls(sql: string, parts: string[], literal: (value: string) => 
   for (let guard = 0; guard < 200; guard += 1) {
     const call = /(^|[^A-Za-z0-9_$])FLATTEN\s*\(/i.exec(out);
     if (!call) return out;
+    approximations?.({ feature: 'LATERAL FLATTEN', detail: 'translated to json_each: variant typing and the index/this columns can differ' });
     const head = call.index + call[1].length;
     const open = head + /FLATTEN\s*\(/i.exec(out.slice(head))![0].length - 1;
     const close = matchParen(out, open);
@@ -1185,6 +1198,7 @@ export function rewrite(
   sql: string,
   ctx: RewriteContext,
   bindings: unknown[] = [],
+  approximations?: ApproximationSink,
 ): string {
   const parts: string[] = [];
   let text = maskNonCode(sql, parts, true);
@@ -1198,7 +1212,7 @@ export function rewrite(
   // `LATERAL FLATTEN(…)` becomes a correlated `json_each` join. It runs before
   // the variant-path pass, so the input expression is still translated, and so
   // are the columns the subquery exposes.
-  text = flattenCalls(text, parts, literal);
+  text = flattenCalls(text, parts, literal, approximations);
 
   if (bindings.length > 0) {
     let index = 0;
@@ -1302,9 +1316,10 @@ export function rewrite(
 
   // dbt's catalog query formats `convert_timezone('UTC', last_altered)`.
   text = replaceCall(text, 'CONVERT_TIMEZONE', parts, (args) => {
+    if (args.length !== 2 && args.length !== 3) return null;
+    approximations?.({ feature: 'CONVERT_TIMEZONE', detail: 'translated to timezone(): session timezone defaults and DST edges can differ' });
     if (args.length === 2) return `timezone(${args[0]}, ${args[1]})`;
-    if (args.length === 3) return `timezone(${args[1]}, timezone(${args[0]}, ${args[2]}))`;
-    return null;
+    return `timezone(${args[1]}, timezone(${args[0]}, ${args[2]}))`;
   });
 
   text = replaceCall(text, 'EQUAL_NULL', parts, (args) => {
@@ -1462,7 +1477,7 @@ export function rewrite(
 
   if (ctx.variantPaths !== false) {
     // `col:field[.sub|[n]]…` / `"Col":field` / `f(x):field` variant access → json_extract.
-    text = variantStringCasts(variantPaths(text, parts, literal));
+    text = variantStringCasts(variantPaths(text, parts, literal, approximations));
   }
 
   text = ddlDecorations(text);
