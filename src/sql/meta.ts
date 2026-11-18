@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import { Catalog, normalizeName } from '../engine/catalog.js';
 import { rewrite, splitColumnListCtas, toSqlLiteral, type ColumnListCtas } from './dialect.js';
+import type { Outcome } from './outcome.js';
 import { Engine, quoteIdent, type EngineConnection, type QueryResult, type SequenceInfo } from '../engine/engine.js';
 import {
   SnowflakeError,
@@ -31,19 +32,6 @@ import { StageStore } from './stage.js';
 import { StatementInterceptor } from '../interceptor.js';
 import { formatTimestamp, toSnowflakeType, toSnowflakeTypeName, type SnowflakeColumn } from '../http/types.js';
 
-export interface Outcome {
-  columns: SnowflakeColumn[];
-  /** Values already encoded for the wire. */
-  rows: unknown[][];
-  statementTypeId: number;
-  rowsAffected: number;
-  /**
-   * PUT/GET are not result sets: the driver protocol answers with a file
-   * transfer descriptor (`command`, `stageInfo`, …) that the client acts on
-   * itself. The server puts this object in the response `data`.
-   */
-  fileTransfer?: Record<string, unknown>;
-}
 
 const STATEMENT_TYPES = {
   select: 4096,

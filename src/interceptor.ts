@@ -6,8 +6,7 @@
  * Every statement a client sends — driver protocol or SQL API v2 — reaches the
  * router through this one wrapper. It exists so the work that happens *around*
  * every statement has a single home instead of leaking into the protocol
- * handlers: timing, the `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` row, and the
- * fidelity notes the model report is built from.
+ * handlers: timing and the `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` row.
  *
  * It knows nothing about SQL semantics. It hands the statement to a callback
  * and records what happened to it; the router keeps routing.
@@ -21,7 +20,7 @@ import type { Catalog } from './engine/catalog.js';
 import type { Engine } from './engine/engine.js';
 import type { Session } from './engine/session.js';
 import { SnowflakeError } from './sql/errors.js';
-import type { Outcome } from './sql/meta.js';
+import type { Outcome } from './sql/outcome.js';
 
 /** QUERY_HISTORY keeps only the head of a long statement. */
 const HISTORY_TEXT_LIMIT = 200;
@@ -88,7 +87,7 @@ export class StatementInterceptor {
         startedAt,
         endedAt: new Date(),
         totalElapsedTime: elapsedMs,
-        rowsProduced: outcome ? (outcome.rows.length > 0 ? outcome.rows.length : outcome.rowsAffected) : 0,
+        rowsProduced: outcome ? outcome.rows.length || outcome.rowsAffected : 0,
       });
     } catch (historyError) {
       process.stderr.write(`snowtest: query history write failed: ${String(historyError)}\n`);

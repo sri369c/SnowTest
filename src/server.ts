@@ -46,7 +46,8 @@ import { renderOperations } from './pages/operations.js';
 import { renderSelfTest, runSelfChecks } from './http/selfcheck.js';
 import { renderConfiguration, renderTroubleshooting } from './pages/usage.js';
 import { PACKAGE_VERSION } from './config/version.js';
-import { StatementRouter, type Outcome } from './sql/meta.js';
+import { StatementRouter } from './sql/meta.js';
+import type { Outcome } from './sql/outcome.js';
 import { DataDir } from './engine/persist.js';
 import {
   SERVER_VERSION,
