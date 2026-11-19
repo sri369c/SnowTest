@@ -136,14 +136,40 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
 
   // Every page the nav links to, this one included: a tab that 500s is the kind
   // of thing you only find out about from the tab you did not click.
-  await check('pages', 6, async (ok) => {
+  await check('pages', 8, async (ok) => {
     const paths = ['/', '/operations', '/configuration', '/troubleshooting', '/self-test', '/settings'];
     for (const path of paths) {
       const response = await request(path);
       const html = await response.text();
       ok(`${path} answered ${response.status} without a heading`, response.status === 200 && html.includes('<h1'));
     }
-    return `${paths.length} pages served`;
+    // One page is only reachable by clicking a database, and one address is the
+    // old name for a page that still has to answer for bookmarks. The database's
+    // name is configuration, not a constant, so ask the catalog what this instance
+    // has rather than assuming the default SNOWTEST.PUBLIC exists.
+    const state = (await (await request('/_snowtest/state')).json()) as {
+      databases?: Array<{ name?: string; schemas?: string[] }>;
+    };
+    // The first database need not have a schema: CREATE DATABASE leaves one empty,
+    // and an empty one can sort first. Take the first database that has a schema.
+    const browsable = (state.databases ?? []).find((entry) => entry.name && entry.schemas?.length);
+    const database = browsable?.name ?? '';
+    const schema = browsable?.schemas?.[0] ?? '';
+    const browsed = await request(`/browse/${encodeURIComponent(database)}/${encodeURIComponent(schema)}`);
+    const browsedHtml = await browsed.text();
+    ok(
+      `/browse/${database}/${schema} answered ${browsed.status} without a heading`,
+      Boolean(database) && Boolean(schema) && browsed.status === 200 && browsedHtml.includes('<h1'),
+    );
+
+    const alias = await request('/usage');
+    const location = alias.headers.get('location');
+    ok(
+      `/usage answered ${alias.status} to ${location ?? 'nowhere'}`,
+      alias.status === 301 && location === '/configuration',
+    );
+
+    return `${paths.length + 2} pages served`;
   });
 
   await check('login', 3, async (ok) => {
@@ -256,7 +282,7 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     }
   });
 
-  await check('SQL API v2', 5, async (ok) => {
+  await check('SQL API v2', 7, async (ok) => {
     const headers = { Authorization: `Bearer ${session('SQL API v2')}`, 'Content-Type': 'application/json' };
     const submitted = await request('/api/v2/statements', {
       method: 'POST',
@@ -267,6 +293,17 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     ok(`submit answered ${submitted.status}`, submitted.status === 200);
     const handle = body.statementHandle;
     ok('submit returned no statement handle', Boolean(handle));
+
+    // The async branch: one poll says the statement is still running, the next
+    // hands over the result, which is how a client that asked for async reads it.
+    const waiting = await request(`/api/v2/statements/${handle}?async=true`, { headers });
+    const waitingBody = (await waiting.json()) as { message?: string };
+    ok(
+      `the first async poll answered ${waiting.status}: ${waitingBody.message ?? 'no message'}`,
+      waiting.status === 202 && (waitingBody.message ?? '').includes('still running'),
+    );
+    const consumed = await request(`/api/v2/statements/${handle}?async=true`, { headers });
+    ok(`the second async poll answered ${consumed.status}`, consumed.status === 200);
 
     const fetched = await request(`/api/v2/statements/${handle}`, { headers });
     ok(`poll answered ${fetched.status}`, fetched.status === 200);
@@ -283,7 +320,7 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
   // Fidelity is the feature the other checks cannot see: they run untagged
   // statements, which by design carry no verdict. A dbt comment is what names a
   // model, so this check sends two tagged statements and reads the ledger back.
-  await check('fidelity', 11, async (ok) => {
+  await check('fidelity', 13, async (ok) => {
     interface LedgerModel {
       nodeId: string;
       constructs: string[];
@@ -303,13 +340,14 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
       return { status: response.status, mode: body.fidelity ?? '', models: body.models ?? [] };
     };
 
-    const submit = async (nodeId: string, sql: string): Promise<number> => {
+    const submit = async (nodeId: string, sql: string): Promise<{ status: number; message: string }> => {
       const response = await request('/api/v2/statements', {
         method: 'POST',
         headers,
         body: JSON.stringify({ statement: `/* {"app": "dbt", "node_id": "${nodeId}"} */\n${sql}` }),
       });
-      return response.status;
+      const body = (await response.json()) as { message?: string };
+      return { status: response.status, message: body.message ?? '' };
     };
 
     const writeMode = async (value: string): Promise<{ status: number; applied?: string; error?: string }> => {
@@ -333,9 +371,9 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
       approximateId,
       "SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP) AS TS",
     );
-    ok(`the approximate statement answered ${approximateStatus}`, approximateStatus === 200);
+    ok(`the approximate statement answered ${approximateStatus.status}`, approximateStatus.status === 200);
     const verifiedStatus = await submit(verifiedId, 'SELECT 1 AS N');
-    ok(`the verified statement answered ${verifiedStatus}`, verifiedStatus === 200);
+    ok(`the verified statement answered ${verifiedStatus.status}`, verifiedStatus.status === 200);
 
     const landed = await modelReport();
     ok(`the ledger answered ${landed.status} after two statements`, landed.status === 200);
@@ -350,7 +388,9 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     // A mode is a setting, not a per-statement hint, so the check leaves it at
     // report — and the restore runs even when a marker above threw, or a failed
     // run would leave the instance refusing the caller's SQL.
-    const target = opened.mode === 'strict' ? 'off' : 'strict';
+    // strict goes on unconditionally and report comes back in the finally, so the
+    // refusal below has a mode that acts rather than one that merely applied.
+    const target = 'strict';
     try {
       const applied = await writeMode(target);
       ok(
@@ -359,6 +399,18 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
       );
       const rejected = await writeMode('sideways');
       ok(`an unknown mode answered ${rejected.status}`, rejected.status === 400);
+
+      // Applying a mode is not the same as the mode acting: strict has to refuse
+      // the approximate statement before it runs, and name the construct.
+      const refused = await submit(
+        'model.snowtest_selfcheck.refused',
+        "SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP) AS TS",
+      );
+      ok(`strict answered the approximate statement ${refused.status}`, refused.status !== 200);
+      ok(
+        `the refusal read "${refused.message.split('\n')[0].slice(0, 60)}"`,
+        refused.message.includes('CONVERT_TIMEZONE') && refused.message.includes('strict'),
+      );
     } finally {
       await writeMode('report');
     }
@@ -366,6 +418,37 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     const restored = await modelReport();
     ok(`the mode read back as ${restored.mode}`, restored.mode === 'report');
     return `${landed.models.length} models, mode ${restored.mode}`;
+  });
+
+  // Drivers rotate their token mid-run, and a rotation that kills the old token
+  // too early breaks every long dbt job. This check keeps its own session, so a
+  // failure here cannot leave the later checks holding a dead token.
+  await check('session', 4, async (ok) => {
+    const login = await request('/session/v1/login-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: { LOGIN_NAME: 'SELF_TEST_ROTATION' } }),
+    });
+    const first = String(((await login.json()) as Envelope).data?.token ?? '');
+    ok('a fresh login returned no token', first !== '');
+
+    const renewal = await request('/session/v1/login-request', {
+      headers: { Authorization: `Bearer ${first}` },
+    });
+    const renewed = String(((await renewal.json()) as Envelope).data?.token ?? '');
+    ok(
+      `renewal answered ${renewal.status} with ${renewed && renewed !== first ? 'a new' : 'no new'} token`,
+      renewal.status === 200 && renewed !== '' && renewed !== first,
+    );
+
+    const stale = await run(request, first, 'select 1');
+    ok(`the replaced token still ran a statement: ${stale.code ?? 'no code'}`, !stale.success);
+    const fresh = await run(request, renewed, 'select 1');
+    ok(`the renewed token returned ${JSON.stringify(fresh.rows)}`, fresh.success && fresh.rows[0]?.[0] === '1');
+
+    // The session is this check's own; hand it back instead of waiting for the sweep.
+    await request('/session', { method: 'POST', headers: { Authorization: `Bearer ${renewed}` } });
+    return 'old token retired, renewed token ran select 1';
   });
 
   await check('error reporting', 3, async (ok) => {
