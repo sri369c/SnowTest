@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULTS, loadConfig } from '../src/config/server-config.js';
 import { rewrite, type Approximation } from '../src/sql/dialect.js';
+import { approximation, type ApproximatedFeature } from '../src/sql/approximations.js';
 
 const ctx = {
   database: 'SNOWTEST',
@@ -50,6 +51,58 @@ describe('translation fidelity', () => {
     expect(featuresOf("SELECT CONVERT_TIMEZONE('UTC', TS) FROM T")).toContain('CONVERT_TIMEZONE');
   });
 
+  it('reports the session clock once per use, call or bare', () => {
+    expect(featuresOf('SELECT CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP, LOCALTIMESTAMP(), GETDATE()')).toEqual([
+      'CURRENT_TIMESTAMP',
+      'CURRENT_TIMESTAMP',
+      'LOCALTIMESTAMP',
+      'GETDATE',
+    ]);
+    expect(featuresOf('SELECT SYSDATE(), CURRENT_DATE')).toEqual([]);
+  });
+
+  it('reports LTZ/TZ casts and conversions, not NTZ', () => {
+    expect(featuresOf("SELECT '2026-01-15 12:00:00'::TIMESTAMP_LTZ, CAST(A AS TIMESTAMP_TZ(3)) FROM T")).toEqual([
+      'TIMESTAMP_LTZ',
+      'TIMESTAMP_TZ',
+    ]);
+    expect(featuresOf('SELECT TO_TIMESTAMP_LTZ(A), TRY_TO_TIMESTAMP_TZ(B) FROM T').sort()).toEqual([
+      'TO_TIMESTAMP_LTZ',
+      'TRY_TO_TIMESTAMP_TZ',
+    ]);
+    expect(featuresOf("SELECT A::TIMESTAMP_NTZ, TO_TIMESTAMP_NTZ(B), 'x::timestamp_ltz' FROM T")).toEqual([]);
+    expect(featuresOf("SELECT CONVERT_TIMEZONE('UTC', TS) AS TIMESTAMP_TZ FROM T")).toEqual(['CONVERT_TIMEZONE']);
+  });
+
+  it('reports TYPEOF', () => {
+    expect(featuresOf('SELECT TYPEOF(V) FROM T')).toEqual(['TYPEOF']);
+  });
+
+  it('reports HASH, but not HASH_AGG', () => {
+    expect(featuresOf('SELECT HASH(A), HASH_AGG(B) FROM T')).toEqual(['HASH']);
+  });
+
+  it('reports TO_VARCHAR of a visible timestamp, not of other values', () => {
+    expect(
+      featuresOf("SELECT TO_VARCHAR(A::TIMESTAMP_NTZ), TO_CHAR(CURRENT_TIMESTAMP()), TO_VARCHAR(TO_TIMESTAMP(B)) FROM T")
+        .filter((feature) => feature.startsWith('TO_'))
+        .sort(),
+    ).toEqual(['TO_CHAR', 'TO_VARCHAR', 'TO_VARCHAR']);
+    expect(featuresOf("SELECT TO_VARCHAR(A), TO_VARCHAR(1.5), TO_CHAR(TS, 'YYYY-MM-DD') FROM T")).toEqual([]);
+  });
+
+  it('reports ARRAY_CONSTRUCT only with a NULL element', () => {
+    expect(featuresOf('SELECT ARRAY_CONSTRUCT(1, NULL), ARRAY_CONSTRUCT(1, 2)')).toEqual(['ARRAY_CONSTRUCT']);
+  });
+
+  it('reports DATEADD only when the operand is visibly a DATE and the unit keeps it one', () => {
+    expect(featuresOf("SELECT DATEADD(day, 1, '2026-01-01'::DATE), DATEADD(month, 1, CURRENT_DATE)")).toEqual([
+      'DATEADD',
+      'DATEADD',
+    ]);
+    expect(featuresOf("SELECT DATEADD(hour, 1, '2026-01-01'::DATE), DATEADD(day, 1, TS) FROM T")).toEqual([]);
+  });
+
   it('says nothing about rewrites that mean exactly what Snowflake means', () => {
     // Each of these is a faithful substitution, not an approximation.
     for (const sql of [
@@ -59,6 +112,8 @@ describe('translation fidelity', () => {
       'SELECT NULLIFZERO(A) FROM T',
       'SELECT DIV0(A, B) FROM T',
       'SELECT DECODE(A, 1, 2, 3) FROM T',
+      'SELECT GREATEST(A, B), LEAST(A, B) FROM T',
+      "SELECT OBJECT_CONSTRUCT('a', A), PARSE_JSON(S), DATEDIFF(week, A, B) FROM T",
       'SELECT A + 1 FROM T',
     ]) {
       expect(featuresOf(sql), sql).toEqual([]);
@@ -74,6 +129,10 @@ describe('translation fidelity', () => {
     expect(rewrite("SELECT CONVERT_TIMEZONE('UTC', TS) FROM T", ctx)).toBe(
       "SELECT TIMEZONE('UTC', TS) FROM T",
     );
+  });
+
+  it('refuses a construct name that is not in the registry', () => {
+    expect(() => approximation('TO_TIMESTMAP_TZ' as ApproximatedFeature)).toThrow(/not registered/);
   });
 });
 
@@ -120,7 +179,7 @@ describe('fidelity: report', () => {
     expect(report.fidelity).toBe('report');
     const model = report.models.find((entry) => entry.nodeId === 'model.demo.approx');
     expect(model?.verdict).toBe('approximate');
-    expect(model?.constructs).toEqual(['CONVERT_TIMEZONE']);
+    expect(model?.constructs.sort()).toEqual(['CONVERT_TIMEZONE', 'CURRENT_TIMESTAMP']);
     expect(model?.statements).toBe(1);
   });
 

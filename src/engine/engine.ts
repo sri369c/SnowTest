@@ -205,7 +205,11 @@ export class Engine {
     // Pinning the zone needs DuckDB's ICU extension, which the bindings do not ship.
     let instance: DuckDBInstance;
     try {
-      instance = await DuckDBInstance.create(':memory:', { TimeZone: 'UTC' });
+      // default_null_order: Snowflake sorts NULL as the highest value — last ascending, first descending.
+      instance = await DuckDBInstance.create(':memory:', {
+        TimeZone: 'UTC',
+        default_null_order: 'nulls_last_on_asc_first_on_desc',
+      });
     } catch (error) {
       const detail = (error as Error).message;
       if (!/icu/i.test(detail)) throw error;

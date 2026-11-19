@@ -32,6 +32,12 @@ describe('function translation', () => {
 
   it('translates DATEDIFF to date_diff', () => {
     expect(run("SELECT DATEDIFF('day', a, b)")).toBe("SELECT DATE_DIFF('day', A, B)");
+    expect(run('SELECT DATEDIFF(week, a, b)')).toBe("SELECT date_diff('week', DATE_TRUNC('week', A), DATE_TRUNC('week', B))");
+  });
+
+  it('evaluates each GREATEST argument once, so nesting does not multiply', () => {
+    const out = run('SELECT GREATEST(GREATEST(GREATEST(n, 1), 2), 3)');
+    expect(out.match(/\bN\b/g)).toHaveLength(1);
   });
 
   it('translates CONVERT_TIMEZONE to timezone()', () => {
@@ -189,7 +195,7 @@ describe('conversion functions', () => {
       ['v:a.b', "JSON_EXTRACT(V, '$.a.b')"],
       ['v:a[0]', "JSON_EXTRACT(V, '$.a[0]')"],
       ['t.v:a', "JSON_EXTRACT(T.V, '$.a')"],
-      ['parse_json(s):k', "JSON_EXTRACT(TRY_CAST(S AS JSON), '$.k')"],
+      ['parse_json(s):k', "JSON_EXTRACT(CAST(NULLIF(TRIM(S), '') AS JSON), '$.k')"],
       ['lag(t) over (order by t)', 'LAG(T) OVER (ORDER BY T)'],
       ['lag(t) over(order by t)', 'LAG(T) OVER(ORDER BY T)'],
       ['lag(t, 1) over (partition by g order by t)', 'LAG(T, 1) OVER (PARTITION BY G ORDER BY T)'],
@@ -329,7 +335,7 @@ describe('variant access', () => {
       "SELECT JSON_EXTRACT(T.V, '$.a.b'), JSON_EXTRACT(\"V\", '$.l[0]'), JSON_EXTRACT(JSON_EXTRACT(V, '$.a'), '$.b') FROM T",
     );
     expect(run("SELECT parse_json(s):k, {'k': v}, x::varchar FROM t")).toBe(
-      "SELECT JSON_EXTRACT(TRY_CAST(S AS JSON), '$.k'), {'k': V}, X::VARCHAR FROM T",
+      "SELECT JSON_EXTRACT(CAST(NULLIF(TRIM(S), '') AS JSON), '$.k'), {'k': V}, X::VARCHAR FROM T",
     );
   });
 
@@ -344,7 +350,10 @@ describe('variant access', () => {
       ['v:a:b::string', "JSON_EXTRACT_STRING(JSON_EXTRACT(V, '$.a'), '$.b')::VARCHAR"],
       ['$1:a:b::string', "JSON_EXTRACT_STRING(JSON_EXTRACT($1, '$.a'), '$.b')::VARCHAR"],
       ['coalesce(a,b):k::string', "JSON_EXTRACT_STRING(COALESCE(A,B), '$.k')::VARCHAR"],
-      ["object_construct('a',x):a::string", "JSON_EXTRACT_STRING(JSON_OBJECT('a', X), '$.a')::VARCHAR"],
+      [
+        "object_construct('a',x):a::string",
+        "JSON_EXTRACT_STRING(CAST(MAP_FROM_ENTRIES(LIST_SORT(LIST_FILTER([{'K': 'a', 'V': to_json(X)}], SNOWTEST_KV -> SNOWTEST_KV.K IS NOT NULL AND SNOWTEST_KV.V IS NOT NULL))) AS JSON), '$.a')::VARCHAR",
+      ],
       ['v:a::varchar', "JSON_EXTRACT_STRING(V, '$.a')::VARCHAR"],
       ['v:a :: text', "JSON_EXTRACT_STRING(V, '$.a') ::VARCHAR"],
       ['v:a::varchar(10)', "JSON_EXTRACT_STRING(V, '$.a')::VARCHAR(10)"],

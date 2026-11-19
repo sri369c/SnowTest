@@ -16,7 +16,10 @@
  */
 
 import { normalizeName, type DatabaseDef } from '../engine/catalog.js';
+import { approximation, type ApproximatedFeature, type ApproximationSink } from './approximations.js';
 import { compilationError, noCurrentContext, unsupported } from './errors.js';
+
+export type { Approximation, ApproximationSink } from './approximations.js';
 
 export interface RewriteContext {
   /** null when the session has no current database/schema. */
@@ -34,17 +37,6 @@ export interface RewriteContext {
   /** `SNOWTEST_CLOCK`: the millisecond instant the clock reports, instead of the host clock. */
   clockMs?: number;
 }
-
-/**
- * One place a translation substitutes an approximation of Snowflake for
- * Snowflake. Only genuine divergences are reported: `IFF` as `CASE`, `NVL2`,
- * `ZEROIFNULL`, `DIV0` and `QUALIFY` (which DuckDB answers itself) are faithful,
- * and warning about those would teach a reader to ignore the warnings that matter.
- */
-export type Approximation = { feature: string; detail: string };
-
-/** Collects approximations while one statement is translated. */
-export type ApproximationSink = (approximation: Approximation) => void;
 
 /** Placeholder marker for text we must not touch (string literals, comments). */
 const MARK = '\u0001';
@@ -313,6 +305,33 @@ function intervalUnit(unit: string): string | null {
     default:
       return null;
   }
+}
+
+/** Units for which Snowflake's DATEADD keeps a DATE a DATE. */
+const DATE_UNITS = new Set(['year', 'quarter', 'month', 'week', 'day']);
+
+/** True only when the text itself says DATE: `::DATE`, `CAST(… AS DATE)`, `DATE '…'`, CURRENT_DATE. */
+function isDateOperand(arg: string): boolean {
+  const text = arg.trim();
+  return (
+    /::\s*DATE$/i.test(text) ||
+    /^(?:TRY_)?CAST\s*\([\s\S]*\bAS\s+DATE\s*\)$/i.test(text) ||
+    /^DATE\s+\S+$/i.test(text) ||
+    /^CURRENT_DATE$/i.test(text)
+  );
+}
+
+/** True only when the text itself says timestamp: a cast, a literal, the clock, or TO_TIMESTAMP*. */
+function isTimestampOperand(arg: string): boolean {
+  const text = arg.trim();
+  return (
+    /::\s*(?:TIMESTAMP\w*|DATETIME)$/i.test(text) ||
+    /^(?:TRY_)?CAST\s*\([\s\S]*\bAS\s+(?:TIMESTAMP\w*|DATETIME)\s*\)$/i.test(text) ||
+    /^TIMESTAMP\s+\S+$/i.test(text) ||
+    /^(?:CURRENT_TIMESTAMP|NOW\(\s*\))$/i.test(text) ||
+    /^epoch_ms\(/i.test(text) ||
+    /^(?:TRY_)?TO_TIMESTAMP(?:_[LN]?TZ)?\s*\(/i.test(text)
+  );
 }
 
 /** `name(args) [WITHIN GROUP (ORDER BY ...)] [OVER (...)]`, re-rendered with the ordering and window clause. */
@@ -755,7 +774,7 @@ function variantPaths(sql: string, parts: string[], literal: Literal, approximat
       throw unsupported(`A variant path after a :: cast (':${unmask(match[1], parts)}') (parenthesise the cast)`);
     }
     if (start < 0) continue;
-    approximations?.({ feature: 'variant path', detail: "translated to json_extract: Snowflake's variant typing is not reproduced" });
+    approximations?.(approximation('variant path'));
     const path = literal(toSqlLiteral(jsonPath(match[1], parts)));
     const replacement = `json_extract(${out.slice(start, end)}, ${path})`;
     out = out.slice(0, start) + replacement + out.slice(end + match[0].length);
@@ -830,6 +849,20 @@ function postfixPrecisionCasts(sql: string, literal: Literal): string {
     cast.lastIndex = start + replacement.length;
   }
   return out;
+}
+
+/** `x::TIMESTAMP_[L]TZ` and `[TRY_]CAST(x AS TIMESTAMP_[L]TZ)`, in order; a column alias `AS timestamp_tz` is not a cast. */
+function zonedCasts(sql: string): ApproximatedFeature[] {
+  const found: Array<[number, ApproximatedFeature]> = [];
+  for (const match of sql.matchAll(/::\s*(TIMESTAMP_?L?TZ)\b/gi)) found.push([match.index, match[1].toUpperCase() as ApproximatedFeature]);
+  for (const match of sql.matchAll(/\b(?:TRY_)?CAST\s*\(/gi)) {
+    const open = match.index + match[0].length - 1;
+    const close = matchParen(sql, open);
+    if (close === -1) continue;
+    const typed = /\bAS\s+(TIMESTAMP_?L?TZ)\s*(?:\(\s*\d+\s*\))?\s*$/i.exec(sql.slice(open + 1, close));
+    if (typed) found.push([match.index, typed[1].toUpperCase() as ApproximatedFeature]);
+  }
+  return found.sort((a, b) => a[0] - b[0]).map(([, feature]) => feature);
 }
 
 /** `x::type` and `[TRY_]CAST(x AS type)`: the only expression positions that name a type. */
@@ -1042,7 +1075,7 @@ function flattenCalls(sql: string, parts: string[], literal: (value: string) => 
   for (let guard = 0; guard < 200; guard += 1) {
     const call = /(^|[^A-Za-z0-9_$])FLATTEN\s*\(/i.exec(out);
     if (!call) return out;
-    approximations?.({ feature: 'LATERAL FLATTEN', detail: 'translated to json_each: variant typing and the index/this columns can differ' });
+    approximations?.(approximation('LATERAL FLATTEN'));
     const head = call.index + call[1].length;
     const open = head + /FLATTEN\s*\(/i.exec(out.slice(head))![0].length - 1;
     const close = matchParen(out, open);
@@ -1248,6 +1281,11 @@ export function rewrite(
   const today = clockMs === undefined ? 'CURRENT_DATE' : `CAST(${now} AS DATE)`;
   const clockTime = clockMs === undefined ? 'current_localtime()' : `CAST(${now} AS TIME)`;
 
+  // Counted before rewriting: the rewrites below emit CURRENT_TIMESTAMP again.
+  for (const match of approximations ? text.matchAll(/\b(CURRENT_TIMESTAMP|LOCALTIMESTAMP|GETDATE)\b/gi) : []) {
+    approximations?.(approximation(match[1].toUpperCase() as ApproximatedFeature));
+  }
+
   for (const name of ['CURRENT_TIMESTAMP', 'LOCALTIMESTAMP']) {
     text = replaceCall(text, name, parts, (args) => {
       const unit = precisionUnit(name, args);
@@ -1283,10 +1321,23 @@ export function rewrite(
     return now;
   });
 
+  for (const feature of approximations ? zonedCasts(text) : []) {
+    approximations?.(approximation(feature));
+  }
+
   text = castTypes(text, literal);
 
   for (const [pattern, replacement] of SIMPLE_RENAMES) {
     text = text.replace(pattern, replacement);
+  }
+
+  // Snowflake: any NULL argument gives NULL; DuckDB skips NULLs. list_reduce evaluates each argument once;
+  // inner name masked so it is not rewritten again.
+  for (const name of ['GREATEST', 'LEAST']) {
+    text = replaceCall(text, name, parts, (args) => {
+      if (args.length < 2) return null;
+      return `list_reduce([${args.join(', ')}], (SNOWTEST_A, SNOWTEST_B) -> CASE WHEN SNOWTEST_A IS NULL OR SNOWTEST_B IS NULL THEN NULL ELSE ${literal(name)}(SNOWTEST_A, SNOWTEST_B) END)`;
+    });
   }
 
   text = replaceCall(text, 'IFF', parts, (args) => {
@@ -1317,10 +1368,19 @@ export function rewrite(
   // dbt's catalog query formats `convert_timezone('UTC', last_altered)`.
   text = replaceCall(text, 'CONVERT_TIMEZONE', parts, (args) => {
     if (args.length !== 2 && args.length !== 3) return null;
-    approximations?.({ feature: 'CONVERT_TIMEZONE', detail: 'translated to timezone(): session timezone defaults and DST edges can differ' });
+    approximations?.(approximation('CONVERT_TIMEZONE'));
     if (args.length === 2) return `timezone(${args[0]}, ${args[1]})`;
     return `timezone(${args[1]}, timezone(${args[0]}, ${args[2]}))`;
   });
+
+  const typeofCalls = approximations ? (text.match(/\bTYPEOF\s*\(/gi)?.length ?? 0) : 0;
+  for (let i = 0; i < typeofCalls; i += 1) {
+    approximations?.(approximation('TYPEOF'));
+  }
+  const hashCalls = approximations ? (text.match(/\bHASH\s*\(/gi)?.length ?? 0) : 0;
+  for (let i = 0; i < hashCalls; i += 1) {
+    approximations?.(approximation('HASH'));
+  }
 
   text = replaceCall(text, 'EQUAL_NULL', parts, (args) => {
     if (args.length !== 2) return null;
@@ -1353,9 +1413,14 @@ export function rewrite(
   const castCall = (tryCast: boolean, value: string, type: string) =>
     `${tryCast ? 'TRY_CAST' : 'CAST'}(${value} AS ${type})`;
 
-  for (const name of ['TO_VARCHAR', 'TO_CHAR', 'TO_TEXT']) {
+  for (const name of ['TO_VARCHAR', 'TO_CHAR', 'TO_TEXT'] as const) {
     text = replaceCall(text, name, parts, (args, resolveArg) => {
-      if (args.length === 1) return castCall(false, args[0], 'VARCHAR');
+      if (args.length === 1) {
+        if (isTimestampOperand(args[0])) {
+          approximations?.(approximation(name));
+        }
+        return castCall(false, args[0], 'VARCHAR');
+      }
       if (args.length !== 2) return null;
       const format = convertFormat(name, resolveArg(args[1]), 'format');
       return format === null ? castCall(false, args[0], 'VARCHAR') : `strftime(${args[0]}, ${literal(format)})`;
@@ -1395,6 +1460,9 @@ export function rewrite(
   ]) {
     for (const [name, tryCast] of [[`TRY_${base}`, true], [base, false]] as const) {
       text = replaceCall(text, name, parts, (args, resolveArg) => {
+        if (/_L?TZ$/.test(base)) {
+          approximations?.(approximation(name as ApproximatedFeature));
+        }
         if (args.length === 1) return castCall(tryCast, args[0], type);
         if (args.length !== 2) return null;
         const second = resolveArg(args[1]).trim();
@@ -1433,11 +1501,16 @@ export function rewrite(
     });
   }
 
-  for (const name of ['DATEADD', 'DATE_ADD', 'TIMESTAMPADD']) {
+  for (const name of ['DATEADD', 'DATE_ADD', 'TIMESTAMPADD'] as const) {
     text = replaceCall(text, name, parts, (args, resolveArg) => {
       if (args.length !== 3) return null;
-      const unit = intervalUnit(normalizeUnit(resolveArg(args[0])));
+      const normalized = normalizeUnit(resolveArg(args[0]));
+      const unit = intervalUnit(normalized);
       if (!unit) return null;
+      // Only a visibly DATE operand: a DATE column cannot be told from a timestamp here.
+      if (DATE_UNITS.has(normalized) && isDateOperand(args[2])) {
+        approximations?.(approximation(name));
+      }
       return `(${args[2]} + (${args[1]}) * INTERVAL 1 ${unit})`;
     });
   }
@@ -1447,6 +1520,11 @@ export function rewrite(
       if (args.length !== 3) return null;
       const unit = normalizeUnit(resolveArg(args[0]));
       if (!INTERVAL_UNITS.has(unit)) return null;
+      // Snowflake counts Monday boundaries crossed (WEEK_START 0); DuckDB counts whole 7-day spans.
+      // date_diff masked: the DATE_DIFF pass of this loop would match it again.
+      if (unit === 'week') {
+        return `${literal('date_diff')}('week', date_trunc('week', ${args[1]}), date_trunc('week', ${args[2]}))`;
+      }
       return `date_diff('${unit}', ${args[1]}, ${args[2]})`;
     });
   }
@@ -1466,10 +1544,30 @@ export function rewrite(
       `COALESCE(array_agg(${arg}${order}) FILTER (WHERE ${arg.replace(/^DISTINCT\s+/i, '')} IS NOT NULL)${over}, [])`,
   );
 
-  text = replaceCall(text, 'ARRAY_CONSTRUCT', parts, (args) => `list_value(${args.join(', ')})`);
-  text = replaceCall(text, 'OBJECT_CONSTRUCT', parts, (args) => `json_object(${args.join(', ')})`);
-  text = replaceCall(text, 'PARSE_JSON', parts, (args) =>
+  text = replaceCall(text, 'ARRAY_CONSTRUCT', parts, (args) => {
+    if (args.some((arg) => /^NULL$/i.test(arg.trim()))) {
+      approximations?.(approximation('ARRAY_CONSTRUCT'));
+    }
+    return `list_value(${args.join(', ')})`;
+  });
+  // Snowflake drops pairs with a SQL NULL key or value and sorts keys (uppercase first).
+  text = replaceCall(text, 'OBJECT_CONSTRUCT', parts, (args) => {
+    if (args.length === 0) return `CAST(${literal("'{}'")} AS JSON)`;
+    if (args.length % 2 !== 0 || args.some((arg) => arg.trim() === '*')) return `json_object(${args.join(', ')})`;
+    // to_json masked: the TO_JSON rewrite below would turn it into CAST(… AS JSON), which rejects plain strings.
+    const toJson = literal('to_json');
+    const pairs: string[] = [];
+    for (let i = 0; i < args.length; i += 2) {
+      pairs.push(`{${literal("'K'")}: ${args[i]}, ${literal("'V'")}: ${toJson}(${args[i + 1]})}`);
+    }
+    return `CAST(map_from_entries(list_sort(list_filter([${pairs.join(', ')}], SNOWTEST_KV -> SNOWTEST_KV.K IS NOT NULL AND SNOWTEST_KV.V IS NOT NULL))) AS JSON)`;
+  });
+  // Snowflake's PARSE_JSON fails on malformed JSON; TRY_PARSE_JSON is the lenient one. Blank input stays NULL.
+  text = replaceCall(text, 'TRY_PARSE_JSON', parts, (args) =>
     args.length === 1 ? `TRY_CAST(${args[0]} AS JSON)` : null,
+  );
+  text = replaceCall(text, 'PARSE_JSON', parts, (args) =>
+    args.length === 1 ? `CAST(NULLIF(trim(${args[0]}), ${literal("''")}) AS JSON)` : null,
   );
   text = replaceCall(text, 'TO_JSON', parts, (args) =>
     args.length === 1 ? `CAST(${args[0]} AS JSON)` : null,

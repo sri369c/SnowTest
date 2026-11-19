@@ -421,6 +421,40 @@ describe('engine behaviour (in memory)', () => {
     ).toEqual([['q', 'r', 's']]);
   });
 
+  it('answers as Snowflake does where DuckDB differs: NULL order, GREATEST/LEAST, OBJECT_CONSTRUCT, PARSE_JSON, week DATEDIFF', async () => {
+    expect(await rows(server, 'select x from (select 1 x union all select null union all select 2) order by x desc')).toEqual([
+      [null],
+      ['2'],
+      ['1'],
+    ]);
+    expect(await rows(server, 'select x from (select 1 x union all select null) order by x')).toEqual([['1'], [null]]);
+    expect(
+      await rows(
+        server,
+        "select ts from (select 1 id, null::timestamp ts union all select 1, '2026-01-01'::timestamp) qualify row_number() over (partition by id order by ts desc) = 1",
+      ),
+    ).toEqual([[null]]);
+    expect(await rows(server, 'select greatest(1, null, 3), least(1, null, 3), greatest(1, 3), least(2, 1)')).toEqual([
+      [null, null, '3', '1'],
+    ]);
+    expect(
+      await rows(
+        server,
+        "select object_construct('b', 2, 'z', null, 'a', 'x', 'B', parse_json('null'))::string, object_construct()::string, object_construct('z', null)::string",
+      ),
+    ).toEqual([['{"B":null,"a":"x","b":2}', '{}', '{}']]);
+    const malformed = await sql(server, "select parse_json('{bad')");
+    expect(malformed.body.sqlState).toBe('22P02');
+    expect(malformed.body.message).toMatch(/^Error parsing JSON/);
+    expect(await rows(server, "select try_parse_json('{bad'), parse_json(''), parse_json('[1]')::string")).toEqual([[null, null, '[1]']]);
+    expect(
+      await rows(
+        server,
+        "select datediff(week, '2026-01-04'::date, '2026-01-05'::date), datediff(week, '2026-01-05'::date, '2026-01-11'::date), datediff(day, '2026-01-04'::date, '2026-01-05'::date)",
+      ),
+    ).toEqual([['1', '0', '1']]);
+  });
+
   it('casts variant paths and window results to TIME, failing as SQLSTATE 22007', async () => {
     expect(
       await rows(
