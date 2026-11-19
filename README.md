@@ -1,10 +1,10 @@
 <!-- Copyright (c) 2026 Srinivas Chaturvedula -->
 
-# snowtest
+# SnowTest
 
-A Snowflake-compatible stub server. Point a client's host and port at it and it
-answers the way Snowflake does — no account, no warehouse cost, no network — well
-enough for integration tests, local development and CI.
+Snowflake, minus the cloud bill. SnowTest is a local Snowflake look-alike powered
+by DuckDB, so you can run your connectors, Snowpark and dbt projects on your
+laptop. Your data survives restarts, and your wallet survives too.
 
 ## Bring it up
 
