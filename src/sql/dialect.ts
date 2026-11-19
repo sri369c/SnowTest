@@ -307,6 +307,21 @@ function intervalUnit(unit: string): string | null {
   }
 }
 
+/** Report `feature` once per occurrence of `pattern`. */
+function reportEach(text: string, pattern: RegExp, feature: ApproximatedFeature, sink: ApproximationSink | undefined): void {
+  const scan = new RegExp(pattern.source, `${pattern.flags.replace('g', '')}g`);
+  while (scan.exec(text) !== null) sink?.(approximation(feature));
+}
+
+/** True when the whole operand is `[TRY_]CAST(… AS <type>)`, not an expression that merely ends in one. */
+function wholeCastTo(text: string, type: string): boolean {
+  const open = /^(?:TRY_)?CAST\s*\(/i.exec(text);
+  if (!open) return false;
+  const at = open[0].length - 1;
+  if (matchParen(text, at) !== text.length - 1) return false;
+  return new RegExp(`^[\\s\\S]*\\bAS\\s+(?:${type})\\s*$`, 'i').test(text.slice(at + 1, -1));
+}
+
 /** Units for which Snowflake's DATEADD keeps a DATE a DATE. */
 const DATE_UNITS = new Set(['year', 'quarter', 'month', 'week', 'day']);
 
@@ -315,7 +330,7 @@ function isDateOperand(arg: string): boolean {
   const text = arg.trim();
   return (
     /::\s*DATE$/i.test(text) ||
-    /^(?:TRY_)?CAST\s*\([\s\S]*\bAS\s+DATE\s*\)$/i.test(text) ||
+    wholeCastTo(text, 'DATE') ||
     /^DATE\s+\S+$/i.test(text) ||
     /^CURRENT_DATE$/i.test(text)
   );
@@ -326,7 +341,7 @@ function isTimestampOperand(arg: string): boolean {
   const text = arg.trim();
   return (
     /::\s*(?:TIMESTAMP\w*|DATETIME)$/i.test(text) ||
-    /^(?:TRY_)?CAST\s*\([\s\S]*\bAS\s+(?:TIMESTAMP\w*|DATETIME)\s*\)$/i.test(text) ||
+    wholeCastTo(text, 'TIMESTAMP\\w*|DATETIME') ||
     /^TIMESTAMP\s+\S+$/i.test(text) ||
     /^(?:CURRENT_TIMESTAMP|NOW\(\s*\))$/i.test(text) ||
     /^epoch_ms\(/i.test(text) ||
@@ -853,16 +868,16 @@ function postfixPrecisionCasts(sql: string, literal: Literal): string {
 
 /** `x::TIMESTAMP_[L]TZ` and `[TRY_]CAST(x AS TIMESTAMP_[L]TZ)`, in order; a column alias `AS timestamp_tz` is not a cast. */
 function zonedCasts(sql: string): ApproximatedFeature[] {
-  const found: Array<[number, ApproximatedFeature]> = [];
-  for (const match of sql.matchAll(/::\s*(TIMESTAMP_?L?TZ)\b/gi)) found.push([match.index, match[1].toUpperCase() as ApproximatedFeature]);
+  const found: ApproximatedFeature[] = [];
+  for (const match of sql.matchAll(/::\s*(TIMESTAMP_?L?TZ)\b/gi)) found.push(match[1].toUpperCase() as ApproximatedFeature);
   for (const match of sql.matchAll(/\b(?:TRY_)?CAST\s*\(/gi)) {
     const open = match.index + match[0].length - 1;
     const close = matchParen(sql, open);
     if (close === -1) continue;
     const typed = /\bAS\s+(TIMESTAMP_?L?TZ)\s*(?:\(\s*\d+\s*\))?\s*$/i.exec(sql.slice(open + 1, close));
-    if (typed) found.push([match.index, typed[1].toUpperCase() as ApproximatedFeature]);
+    if (typed) found.push(typed[1].toUpperCase() as ApproximatedFeature);
   }
-  return found.sort((a, b) => a[0] - b[0]).map(([, feature]) => feature);
+  return found;
 }
 
 /** `x::type` and `[TRY_]CAST(x AS type)`: the only expression positions that name a type. */
@@ -1373,14 +1388,8 @@ export function rewrite(
     return `timezone(${args[1]}, timezone(${args[0]}, ${args[2]}))`;
   });
 
-  const typeofCalls = approximations ? (text.match(/\bTYPEOF\s*\(/gi)?.length ?? 0) : 0;
-  for (let i = 0; i < typeofCalls; i += 1) {
-    approximations?.(approximation('TYPEOF'));
-  }
-  const hashCalls = approximations ? (text.match(/\bHASH\s*\(/gi)?.length ?? 0) : 0;
-  for (let i = 0; i < hashCalls; i += 1) {
-    approximations?.(approximation('HASH'));
-  }
+  reportEach(text, /\bTYPEOF\s*\(/gi, 'TYPEOF', approximations);
+  reportEach(text, /\bHASH\s*\(/gi, 'HASH', approximations);
 
   text = replaceCall(text, 'EQUAL_NULL', parts, (args) => {
     if (args.length !== 2) return null;
@@ -1551,14 +1560,17 @@ export function rewrite(
     return `list_value(${args.join(', ')})`;
   });
   // Snowflake drops pairs with a SQL NULL key or value and sorts keys (uppercase first).
-  text = replaceCall(text, 'OBJECT_CONSTRUCT', parts, (args) => {
+  text = replaceCall(text, 'OBJECT_CONSTRUCT', parts, (args, resolveArg) => {
     if (args.length === 0) return `CAST(${literal("'{}'")} AS JSON)`;
     if (args.length % 2 !== 0 || args.some((arg) => arg.trim() === '*')) return `json_object(${args.join(', ')})`;
     // to_json masked: the TO_JSON rewrite below would turn it into CAST(… AS JSON), which rejects plain strings.
     const toJson = literal('to_json');
+    // Snowflake keeps the last value for a repeated key; map_from_entries rejects a duplicate outright.
+    const keyOf = (index: number) => resolveArg(args[index]).trim();
     const pairs: string[] = [];
     for (let i = 0; i < args.length; i += 2) {
-      pairs.push(`{${literal("'K'")}: ${args[i]}, ${literal("'V'")}: ${toJson}(${args[i + 1]})}`);
+      const repeatedLaterKey = args.some((_arg, at) => at > i && at % 2 === 0 && keyOf(at) === keyOf(i));
+      if (!repeatedLaterKey) pairs.push(`{${literal("'K'")}: ${args[i]}, ${literal("'V'")}: ${toJson}(${args[i + 1]})}`);
     }
     return `CAST(map_from_entries(list_sort(list_filter([${pairs.join(', ')}], SNOWTEST_KV -> SNOWTEST_KV.K IS NOT NULL AND SNOWTEST_KV.V IS NOT NULL))) AS JSON)`;
   });

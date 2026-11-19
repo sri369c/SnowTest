@@ -74,9 +74,6 @@ const DETAILS = new Map<string, string>(
   GROUPS.flatMap((group) => group.features.map((feature): [string, string] => [feature, group.detail])),
 );
 
-/** Every reportable feature name, in registry order. */
-export const APPROXIMATED_FEATURES: readonly ApproximatedFeature[] = GROUPS.flatMap((group) => group.features);
-
 /** The registered approximation for `feature`. Unlisted names throw: a typo must not reach the ledger. */
 export function approximation(feature: ApproximatedFeature): Approximation {
   const detail = DETAILS.get(feature);
