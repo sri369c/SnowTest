@@ -282,7 +282,7 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     }
   });
 
-  await check('SQL API v2', 7, async (ok) => {
+  await check('SQL API v2', 6, async (ok) => {
     const headers = { Authorization: `Bearer ${session('SQL API v2')}`, 'Content-Type': 'application/json' };
     const submitted = await request('/api/v2/statements', {
       method: 'POST',
@@ -294,8 +294,9 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     const handle = body.statementHandle;
     ok('submit returned no statement handle', Boolean(handle));
 
-    // The async branch: one poll says the statement is still running, the next
-    // hands over the result, which is how a client that asked for async reads it.
+    // The async branch: the first poll says the statement is still running, the one
+    // after it hands over the result. A second 202 would hang a polling client, so
+    // the second poll has to carry the row, not merely answer.
     const waiting = await request(`/api/v2/statements/${handle}?async=true`, { headers });
     const waitingBody = (await waiting.json()) as { message?: string };
     ok(
@@ -303,14 +304,18 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
       waiting.status === 202 && (waitingBody.message ?? '').includes('still running'),
     );
     const consumed = await request(`/api/v2/statements/${handle}?async=true`, { headers });
-    ok(`the second async poll answered ${consumed.status}`, consumed.status === 200);
+    const result = (await consumed.json()) as { data?: unknown[][] };
+    ok(
+      `the second async poll answered ${consumed.status} with ${JSON.stringify(result.data)}`,
+      consumed.status === 200 && result.data?.[0]?.[0] === '1',
+    );
 
-    const fetched = await request(`/api/v2/statements/${handle}`, { headers });
-    ok(`poll answered ${fetched.status}`, fetched.status === 200);
-
-    const cancelled = await request(`/api/v2/statements/${handle}/cancel`, { method: 'POST' });
+    const cancelled = await request(`/api/v2/statements/${handle}/cancel`, { method: 'POST', headers });
     const cancelledBody = (await cancelled.json()) as { code?: string };
-    ok(`cancel answered ${cancelledBody.code ?? 'no code'}`, cancelledBody.code === '000604');
+    ok(
+      `cancel answered ${cancelled.status} with ${cancelledBody.code ?? 'no code'}`,
+      cancelled.status === 200 && cancelledBody.code === '000604',
+    );
 
     const gone = await request(`/api/v2/statements/${handle}`, { headers });
     ok(`cancelled handle still answers ${gone.status}`, gone.status === 404);
@@ -320,7 +325,7 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
   // Fidelity is the feature the other checks cannot see: they run untagged
   // statements, which by design carry no verdict. A dbt comment is what names a
   // model, so this check sends two tagged statements and reads the ledger back.
-  await check('fidelity', 13, async (ok) => {
+  await check('fidelity', 10, async (ok) => {
     interface LedgerModel {
       nodeId: string;
       constructs: string[];
@@ -332,22 +337,25 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
       'Content-Type': 'application/json',
     };
 
-    // Reading is separate from asserting: the ledger is read twice and the mode
-    // four times, and only the reads that make a claim should count.
+    // Reading is separate from asserting: a request that only feeds a later claim
+    // is not counted twice.
     const modelReport = async (): Promise<{ status: number; mode: string; models: LedgerModel[] }> => {
       const response = await request('/_snowtest/models');
       const body = (await response.json()) as { fidelity?: string; models?: LedgerModel[] };
       return { status: response.status, mode: body.fidelity ?? '', models: body.models ?? [] };
     };
 
-    const submit = async (nodeId: string, sql: string): Promise<{ status: number; message: string }> => {
+    const submit = async (
+      nodeId: string,
+      sql: string,
+    ): Promise<{ status: number; code: string; message: string }> => {
       const response = await request('/api/v2/statements', {
         method: 'POST',
         headers,
         body: JSON.stringify({ statement: `/* {"app": "dbt", "node_id": "${nodeId}"} */\n${sql}` }),
       });
-      const body = (await response.json()) as { message?: string };
-      return { status: response.status, message: body.message ?? '' };
+      const body = (await response.json()) as { code?: string; message?: string };
+      return { status: response.status, code: body.code ?? '', message: body.message ?? '' };
     };
 
     const writeMode = async (value: string): Promise<{ status: number; applied?: string; error?: string }> => {
@@ -360,10 +368,14 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
       return { status: response.status, applied: body.applied, error: body.error };
     };
 
+    // One read, one assertion: the endpoint answered and its body names the mode in
+    // force. `models` is defaulted to [] when the body omits it, so asserting that
+    // the list is an array would be true by construction.
     const opened = await modelReport();
-    ok(`GET /_snowtest/models answered ${opened.status}`, opened.status === 200);
-    ok('the report named no mode', opened.mode !== '');
-    ok('the report carried no model list', Array.isArray(opened.models));
+    ok(
+      `GET /_snowtest/models answered ${opened.status} with mode ${opened.mode || 'missing'}`,
+      opened.status === 200 && opened.mode !== '',
+    );
 
     const approximateId = 'model.snowtest_selfcheck.approximate';
     const verifiedId = 'model.snowtest_selfcheck.verified';
@@ -375,8 +387,9 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     const verifiedStatus = await submit(verifiedId, 'SELECT 1 AS N');
     ok(`the verified statement answered ${verifiedStatus.status}`, verifiedStatus.status === 200);
 
+    // No second status assertion: this is the same endpoint as the read above, and
+    // a failed read leaves both verdicts below naming a missing model themselves.
     const landed = await modelReport();
-    ok(`the ledger answered ${landed.status} after two statements`, landed.status === 200);
     const approximate = landed.models.find((model) => model.nodeId === approximateId);
     ok(
       `${approximateId} came back ${approximate?.verdict ?? 'missing'} with ${JSON.stringify(approximate?.constructs ?? [])}`,
@@ -386,10 +399,9 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     ok(`${verifiedId} came back ${verified?.verdict ?? 'missing'}`, verified?.verdict === 'verified');
 
     // A mode is a setting, not a per-statement hint, so the check leaves it at
-    // report — and the restore runs even when a marker above threw, or a failed
-    // run would leave the instance refusing the caller's SQL.
-    // strict goes on unconditionally and report comes back in the finally, so the
-    // refusal below has a mode that acts rather than one that merely applied.
+    // report. strict goes on unconditionally and report comes back in the finally
+    // even when an assertion above threw, or a failed run would leave the instance
+    // refusing the caller's SQL.
     const target = 'strict';
     try {
       const applied = await writeMode(target);
@@ -406,7 +418,13 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
         'model.snowtest_selfcheck.refused',
         "SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP) AS TS",
       );
-      ok(`strict answered the approximate statement ${refused.status}`, refused.status !== 200);
+      // The status and the code, not merely "not 200": a crash answering 500 with no
+      // Snowflake code would satisfy the weaker form while proving nothing about
+      // strict.
+      ok(
+        `strict answered the approximate statement ${refused.status} ${refused.code}`,
+        refused.status === 422 && refused.code === '002003',
+      );
       ok(
         `the refusal read "${refused.message.split('\n')[0].slice(0, 60)}"`,
         refused.message.includes('CONVERT_TIMEZONE') && refused.message.includes('strict'),
@@ -423,14 +441,16 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
   // Drivers rotate their token mid-run, and a rotation that kills the old token
   // too early breaks every long dbt job. This check keeps its own session, so a
   // failure here cannot leave the later checks holding a dead token.
-  await check('session', 4, async (ok) => {
+  await check('session', 3, async (ok) => {
     const login = await request('/session/v1/login-request', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ data: { LOGIN_NAME: 'SELF_TEST_ROTATION' } }),
     });
     const first = String(((await login.json()) as Envelope).data?.token ?? '');
-    ok('a fresh login returned no token', first !== '');
+    // Whether a login hands back a token is the 'login' check's assertion; counting
+    // it again here would say nothing new. This stops with the reason instead.
+    if (!first) throw new Error(`a fresh login answered ${login.status} with no token`);
 
     const renewal = await request('/session/v1/login-request', {
       headers: { Authorization: `Bearer ${first}` },

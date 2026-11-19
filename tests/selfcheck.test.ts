@@ -60,7 +60,7 @@ describe('self test', () => {
       expect(check.passed, check.name).toBe(check.total);
     }
 
-    expect(report.total).toBe(60);
+    expect(report.total).toBe(55);
     expect(report.passed).toBe(report.total);
     expect(report.durationMs).toBeGreaterThan(0);
   }, 60_000);
