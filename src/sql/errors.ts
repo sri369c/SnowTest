@@ -133,6 +133,9 @@ export function mapEngineError(error: unknown): SnowflakeError {
   if (/Conversion Error: (?:invalid )?(?:date|time|timestamp)\w* field/i.test(raw)) {
     return new SnowflakeError('100038', `Date/time value is not recognized:\n${message}`, '22007', 'runtime');
   }
+  if (/Conversion Error: Malformed JSON/i.test(raw)) {
+    return new SnowflakeError('100069', `Error parsing JSON: ${message.replace(/^Conversion Error:\s*/i, '')}`, '22P02', 'runtime');
+  }
   if (/Conversion Error|Could not convert/i.test(raw)) {
     return new SnowflakeError('100038', `Numeric value is not recognized:\n${message}`, '22018', 'runtime');
   }

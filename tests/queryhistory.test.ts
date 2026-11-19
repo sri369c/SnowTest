@@ -218,7 +218,7 @@ describe('fidelity in the timings table', () => {
       `SELECT fidelity FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
        WHERE query_text LIKE '%CONVERT_TIMEZONE%'`,
     );
-    expect(String(model[0][0])).toBe('approximate: CONVERT_TIMEZONE');
+    expect(String(model[0][0])).toBe('approximate: CURRENT_TIMESTAMP, CONVERT_TIMEZONE');
 
     await rows(server, 'SELECT 7 AS PLAIN_TRAFFIC');
     const plain = await rows(

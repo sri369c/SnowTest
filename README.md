@@ -1,10 +1,10 @@
 <!-- Copyright (c) 2026 Srinivas Chaturvedula -->
 
-# snowtest
+# SnowTest
 
-A Snowflake-compatible stub server. Point a client's host and port at it and it
-answers the way Snowflake does — no account, no warehouse cost, no network — well
-enough for integration tests, local development and CI.
+Snowflake, minus the cloud bill. SnowTest is a local Snowflake look-alike powered
+by DuckDB, so you can run your connectors, Snowpark and dbt projects on your
+laptop. Your data survives restarts, and your wallet survives too.
 
 ## Bring it up
 
@@ -53,11 +53,27 @@ the running server itself: `/operations`, `/configuration`, `/troubleshooting`.
 ## Translation fidelity
 
 Emulating Snowflake with DuckDB means a few constructs are translated by
-approximation rather than exactly: variant paths, `FLATTEN` and
-`CONVERT_TIMEZONE`. Every statement gets a verdict for that — `verified`, or
+approximation rather than exactly: variant paths, `FLATTEN`,
+`CONVERT_TIMEZONE`, the session clock (`CURRENT_TIMESTAMP`, `LOCALTIMESTAMP`,
+`GETDATE`) and `TIMESTAMP_LTZ`/`TIMESTAMP_TZ` casts and `TO_TIMESTAMP_LTZ`/`_TZ`
+(DuckDB ignores the session `TIMEZONE`), `TYPEOF` (DuckDB type names), and
+`DATEADD` on a visible DATE (`::DATE`, `CAST(… AS DATE)`, `CURRENT_DATE`) by a
+day-or-larger unit (returns a timestamp), `TO_VARCHAR`/`TO_CHAR` of a visible
+timestamp without a format (DuckDB's text, not `.FF3`), `HASH` (different
+values) and `ARRAY_CONSTRUCT` with a `NULL` element. Every statement gets a verdict for that — `verified`, or
 `approximate` with the constructs named — and faithful rewrites (`IFF`, `NVL2`,
-`ZEROIFNULL`, `NULLIFZERO`, `DIV0`, `DECODE`) are not reported, because noise is
+`ZEROIFNULL`, `NULLIFZERO`, `DIV0`, `DECODE`, `GREATEST`/`LEAST`,
+`OBJECT_CONSTRUCT`, `PARSE_JSON`, `DATEDIFF`) are not reported, because noise is
 how a reader learns to skip the warnings that matter.
+
+Some differences are fixed rather than reported: NULLs sort first in a
+descending `ORDER BY` (so `ROW_NUMBER() … ORDER BY x DESC` keeps the row
+Snowflake keeps), `GREATEST`/`LEAST` return NULL when any argument is NULL,
+`OBJECT_CONSTRUCT` drops SQL-NULL pairs and sorts keys, `PARSE_JSON` fails on
+malformed JSON (`TRY_PARSE_JSON` returns NULL), and `DATEDIFF(week, …)` counts
+Monday boundaries. One known gap is neither: integer division returns a double
+(`1/3` → `0.3333333333333333`, not `0.333333`), and with no rewrite to hook it is
+not reported.
 
 `--fidelity <off|report|strict>` (or `SNOWTEST_FIDELITY`) decides what happens:
 
@@ -73,6 +89,7 @@ the Query timings table on the landing page, which can be narrowed to statements
 a dbt model sent. `/settings` switches the mode without a restart;
 `POST /_snowtest/fidelity` does the same from curl. The reasoning, the upgrade
 path for an existing volume and the per-model ledger are all in
-[the 5.0.0 release notes](release_notes/5.0.0.md).
+[the 5.0.0 release notes](release_notes/5.0.0.md); the constructs added in
+5.0.1 are in [its release notes](release_notes/5.0.1.md).
 
 MIT, see [LICENSE](LICENSE).

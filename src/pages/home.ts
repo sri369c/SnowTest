@@ -926,9 +926,9 @@ ${noticeFor('seed')}
 
   const body = `<h1>A Snowflake-compatible stub server</h1>
 <p class="lede">
-  Point a Snowflake client's host and port here and it answers the way Snowflake does —
-  no account, no warehouse cost, no network. Use it for integration tests, local
-  development and CI.
+  Snowflake, minus the cloud bill. SnowTest is a local Snowflake look-alike powered by
+  DuckDB, so you can run your connectors, Snowpark and dbt projects on your laptop.
+  Your data survives restarts, and your wallet survives too.
 </p>
 
 ${renderTabs(
