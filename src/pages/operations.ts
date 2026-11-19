@@ -631,7 +631,7 @@ export const GROUPS: OperationGroup[] = [
       },
       {
         syntax: 'DATEADD, DATEDIFF, CONVERT_TIMEZONE',
-        behaviour: 'Interval arithmetic, `date_diff`, `timezone()`.',
+        behaviour: 'Interval arithmetic, `date_diff`, `timezone()`. `DATEDIFF(week, …)` counts Monday boundaries crossed, as Snowflake does with the default WEEK_START.',
         status: 'supported',
         since: '1.0.0',
       },
@@ -645,8 +645,9 @@ export const GROUPS: OperationGroup[] = [
         note: 'Any other format element (HH, FF1, …), and any number format model, is refused with an error naming it rather than ignored.',
       },
       {
-        syntax: 'ARRAY_CONSTRUCT, OBJECT_CONSTRUCT, PARSE_JSON, TO_JSON',
-        behaviour: 'JSON arrays and objects.',
+        syntax: 'ARRAY_CONSTRUCT, OBJECT_CONSTRUCT, PARSE_JSON, TRY_PARSE_JSON, TO_JSON',
+        behaviour:
+          'JSON arrays and objects. `OBJECT_CONSTRUCT` drops pairs with a SQL NULL key or value and sorts keys; `PARSE_JSON` fails on malformed JSON and `TRY_PARSE_JSON` returns NULL; a blank string parses to NULL.',
         status: 'supported',
         since: '1.0.0',
       },

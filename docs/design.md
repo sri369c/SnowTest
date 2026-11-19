@@ -96,6 +96,7 @@ src/
   sql/
     meta.ts        statement router: metadata/side-effecting SQL vs DuckDB
     dialect.ts     Snowflake to DuckDB translation rules
+    approximations.ts  every construct the fidelity pass reports, with its detail
     errors.ts      Snowflake-shaped errors (code + SQLSTATE + kind)
     stage.ts       stage directories on disk (PUT/GET/LIST/COPY INTO backing)
   http/
@@ -275,7 +276,7 @@ fails with `… is not supported on snowtest` (`002003`, SQLSTATE `0A000`).
 | Aggregates | `LISTAGG`/`ARRAY_AGG … WITHIN GROUP (ORDER BY …)` → ordering moved inside the call; `ARRAY_AGG` → `COALESCE(array_agg(x) FILTER (WHERE x IS NOT NULL), [])`; `BOOL_OR/BOOL_AND` aliases |
 | Dates | `DATEADD`, `DATEDIFF`, `TO_DATE`, `TO_TIMESTAMP*` with format → `strptime` (`FF`/`FF9` → `%n`, `FF6` → `%f`, `FF3` → `%g`), `TO_TIMESTAMP(n, scale)` |
 | Casts | `TO_VARCHAR` with format → `strftime`; `TO_NUMBER`, `TO_DOUBLE`, `TO_BOOLEAN`, `TO_BINARY`; every `TRY_` variant → `TRY_CAST`; `::string`, `::number`, `::variant` |
-| Semi-structured | `payload:path`, `payload:path::string`, `ARRAY_CONSTRUCT`, `OBJECT_CONSTRUCT`, `PARSE_JSON`, `TO_JSON` |
+| Semi-structured | `payload:path`, `payload:path::string`, `ARRAY_CONSTRUCT`, `OBJECT_CONSTRUCT` (SQL-NULL pairs dropped, keys sorted), `PARSE_JSON` (malformed fails), `TRY_PARSE_JSON`, `TO_JSON` |
 | Table functions | `LATERAL FLATTEN(input => …)` and `TABLE(FLATTEN(…))` → a lateral `json_each` join exposing `SEQ`, `KEY`, `PATH`, `INDEX`, `VALUE` and `THIS`; `path`, `outer` and `mode` are honoured, `recursive => TRUE` is refused |
 | Types | `NUMBER[(p[,s])]`, `DECIMAL`/`NUMERIC` without scale → `DECIMAL(38,0)`, `VARIANT`, `OBJECT`, `ARRAY`, `STRING`, `FLOAT`, `TIMESTAMP_NTZ/LTZ/TZ`, `BINARY`, `VARCHAR(16777216)` — only in type positions: `::`, `CAST(… AS …)`, column definitions of `CREATE TABLE` and `ALTER TABLE … ADD | … TYPE` |
 | String literals | Snowflake backslash escapes decoded (`\'`, `\\`, `\n`, `\t`, `\xhh`, `\uhhhh`, octal) and re-emitted as a DuckDB literal; NUL refused |
