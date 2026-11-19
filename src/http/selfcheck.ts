@@ -6,7 +6,9 @@
  * Every check goes through the same HTTP surface a client uses, so a pass means
  * the instance answering the request works, not that the source tree compiles.
  * Anything that needs somewhere to write goes into its own database, which the
- * last check drops again; a run never touches the caller's data.
+ * last check drops again. The fidelity check is the one exception: a dbt comment
+ * is the only thing that names a model, so it leaves two rows in
+ * SNOWFLAKE.ACCOUNT_USAGE.MODEL_FIDELITY under `model.snowtest_selfcheck.*`.
  *
  * A check is a group of assertions, and each group reports how many of its own
  * assertions passed, so `4/4` says more than a bare pass. A group stops at its
@@ -134,8 +136,8 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
 
   // Every page the nav links to, this one included: a tab that 500s is the kind
   // of thing you only find out about from the tab you did not click.
-  await check('pages', 5, async (ok) => {
-    const paths = ['/', '/operations', '/configuration', '/troubleshooting', '/self-test'];
+  await check('pages', 6, async (ok) => {
+    const paths = ['/', '/operations', '/configuration', '/troubleshooting', '/self-test', '/settings'];
     for (const path of paths) {
       const response = await request(path);
       const html = await response.text();
@@ -278,6 +280,94 @@ export async function runSelfChecks(inner: Request): Promise<SelfReport> {
     return 'submitted, polled and cancelled one statement';
   });
 
+  // Fidelity is the feature the other checks cannot see: they run untagged
+  // statements, which by design carry no verdict. A dbt comment is what names a
+  // model, so this check sends two tagged statements and reads the ledger back.
+  await check('fidelity', 11, async (ok) => {
+    interface LedgerModel {
+      nodeId: string;
+      constructs: string[];
+      verdict: string;
+    }
+
+    const headers = {
+      Authorization: `Bearer ${session('fidelity')}`,
+      'Content-Type': 'application/json',
+    };
+
+    // Reading is separate from asserting: the ledger is read twice and the mode
+    // four times, and only the reads that make a claim should count.
+    const modelReport = async (): Promise<{ status: number; mode: string; models: LedgerModel[] }> => {
+      const response = await request('/_snowtest/models');
+      const body = (await response.json()) as { fidelity?: string; models?: LedgerModel[] };
+      return { status: response.status, mode: body.fidelity ?? '', models: body.models ?? [] };
+    };
+
+    const submit = async (nodeId: string, sql: string): Promise<number> => {
+      const response = await request('/api/v2/statements', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ statement: `/* {"app": "dbt", "node_id": "${nodeId}"} */\n${sql}` }),
+      });
+      return response.status;
+    };
+
+    const writeMode = async (value: string): Promise<{ status: number; applied?: string; error?: string }> => {
+      const response = await request('/_snowtest/fidelity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value }),
+      });
+      const body = (await response.json()) as { applied?: string; error?: string };
+      return { status: response.status, applied: body.applied, error: body.error };
+    };
+
+    const opened = await modelReport();
+    ok(`GET /_snowtest/models answered ${opened.status}`, opened.status === 200);
+    ok('the report named no mode', opened.mode !== '');
+    ok('the report carried no model list', Array.isArray(opened.models));
+
+    const approximateId = 'model.snowtest_selfcheck.approximate';
+    const verifiedId = 'model.snowtest_selfcheck.verified';
+    const approximateStatus = await submit(
+      approximateId,
+      "SELECT CONVERT_TIMEZONE('UTC', CURRENT_TIMESTAMP) AS TS",
+    );
+    ok(`the approximate statement answered ${approximateStatus}`, approximateStatus === 200);
+    const verifiedStatus = await submit(verifiedId, 'SELECT 1 AS N');
+    ok(`the verified statement answered ${verifiedStatus}`, verifiedStatus === 200);
+
+    const landed = await modelReport();
+    ok(`the ledger answered ${landed.status} after two statements`, landed.status === 200);
+    const approximate = landed.models.find((model) => model.nodeId === approximateId);
+    ok(
+      `${approximateId} came back ${approximate?.verdict ?? 'missing'} with ${JSON.stringify(approximate?.constructs ?? [])}`,
+      approximate?.verdict === 'approximate' && approximate.constructs.includes('CONVERT_TIMEZONE'),
+    );
+    const verified = landed.models.find((model) => model.nodeId === verifiedId);
+    ok(`${verifiedId} came back ${verified?.verdict ?? 'missing'}`, verified?.verdict === 'verified');
+
+    // A mode is a setting, not a per-statement hint, so the check leaves it at
+    // report — and the restore runs even when a marker above threw, or a failed
+    // run would leave the instance refusing the caller's SQL.
+    const target = opened.mode === 'strict' ? 'off' : 'strict';
+    try {
+      const applied = await writeMode(target);
+      ok(
+        `applying ${target} answered ${applied.status}: ${applied.error ?? applied.applied ?? ''}`,
+        applied.status === 200 && applied.applied === target,
+      );
+      const rejected = await writeMode('sideways');
+      ok(`an unknown mode answered ${rejected.status}`, rejected.status === 400);
+    } finally {
+      await writeMode('report');
+    }
+
+    const restored = await modelReport();
+    ok(`the mode read back as ${restored.mode}`, restored.mode === 'report');
+    return `${landed.models.length} models, mode ${restored.mode}`;
+  });
+
   await check('error reporting', 3, async (ok) => {
     const result = await run(request, session('error reporting'), 'select * from no_such_table_self_check');
     ok('a query against a missing table succeeded', !result.success);
@@ -400,7 +490,8 @@ export function renderSelfTest(version: string): string {
   const body = `<h1>Self Test</h1>
 <p class="lede">Runs a set of checks against this instance, over the same endpoints a client uses,
 and reports each one with how many of its own assertions passed. It writes only to a scratch
-database, <code>${DATABASE}</code>, and drops it at the end.</p>
+database, <code>${DATABASE}</code>, and drops it at the end, apart from two rows in the fidelity
+ledger under <code>model.snowtest_selfcheck.*</code>.</p>
 
 <div class="ops">
 <button type="button" id="run-self-test">Run self test</button>

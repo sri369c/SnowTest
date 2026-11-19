@@ -54,13 +54,13 @@ describe('self test', () => {
 
     expect(report.ok).toBe(true);
     expect(report.failedChecks).toBe(0);
-    expect(report.checks.length).toBe(11);
+    expect(report.checks.length).toBe(12);
     for (const check of report.checks) {
       expect(check.total, check.name).toBeGreaterThan(0);
       expect(check.passed, check.name).toBe(check.total);
     }
 
-    expect(report.total).toBe(38);
+    expect(report.total).toBe(50);
     expect(report.passed).toBe(report.total);
     expect(report.durationMs).toBeGreaterThan(0);
   }, 60_000);
