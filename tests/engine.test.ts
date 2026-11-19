@@ -440,9 +440,9 @@ describe('engine behaviour (in memory)', () => {
     expect(
       await rows(
         server,
-        "select object_construct('b', 2, 'z', null, 'a', 'x', 'B', parse_json('null'))::string, object_construct()::string, object_construct('z', null)::string",
+        "select object_construct('b', 2, 'z', null, 'a', 'x', 'B', parse_json('null'))::string, object_construct()::string, object_construct('z', null)::string, object_construct('c', 1, 'c', 2)::string",
       ),
-    ).toEqual([['{"B":null,"a":"x","b":2}', '{}', '{}']]);
+    ).toEqual([['{"B":null,"a":"x","b":2}', '{}', '{}', '{"c":2}']]);
     const malformed = await sql(server, "select parse_json('{bad')");
     expect(malformed.body.sqlState).toBe('22P02');
     expect(malformed.body.message).toMatch(/^Error parsing JSON/);
