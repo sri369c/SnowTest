@@ -16,12 +16,14 @@
  * directory, so a release cannot be claimed without a note.
  */
 
+import { execSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
 import { GROUPS } from '../src/pages/operations.js';
+import { ROOT, VERSION_OWNERS, readOwner } from '../scripts/version-owners.js';
 
 const SEMVER = /^\d+\.\d+\.\d+$/;
 
@@ -86,12 +88,52 @@ describe('CI reads the pins', () => {
   });
 });
 
-describe('compose agrees with the manifest', () => {
-  it('falls back to the package version, which is what setup.py tags', () => {
-    const compose = read('compose.yaml');
-    const match = /snowtest:\$\{SNOWTEST_VERSION:-([^}]+)\}/.exec(compose);
-    expect(match, 'compose.yaml has no image tag fallback').not.toBeNull();
-    expect(match?.[1]).toBe(manifest.version);
+describe('every place the version lives agrees', () => {
+  // The list is the point: add a place there, not a find/replace here.
+  it('is a list, not one file with a comment in it', () => {
+    expect(VERSION_OWNERS.length).toBeGreaterThan(1);
+    expect(new Set(VERSION_OWNERS.map((owner) => owner.file)).size).toBeGreaterThan(1);
+  });
+
+  for (const owner of VERSION_OWNERS) {
+    it(`holds the package version in ${owner.file} (${owner.what})`, () => {
+      expect(readOwner(owner)).toBe(manifest.version);
+    });
+  }
+
+  // A place that owns the version has to be in the list; any other file that
+  // spells it out is either a stale copy or a place that needs an entry.
+  const allowed = new Set([
+    ...VERSION_OWNERS.map((owner) => owner.file),
+    `release_notes/${manifest.version}.md`,
+    // `since:` names the release a feature shipped in, which is not an owner.
+    'src/pages/operations.ts',
+  ]);
+
+  const git = (() => {
+    try {
+      execSync('git rev-parse --verify HEAD', { cwd: ROOT, stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!git)('spells it nowhere else in tracked files', () => {
+    let tracked: string[] = [];
+    try {
+      tracked = execSync(`git grep -lF -- ${manifest.version}`, { cwd: ROOT, encoding: 'utf8' })
+        .split('\n')
+        .filter(Boolean)
+        .map((file) => file.trim().replace(/\\/g, '/'));
+    } catch {
+      tracked = [];
+    }
+
+    expect(
+      tracked.filter((file) => !allowed.has(file)),
+      `these files spell out ${manifest.version} but are not in scripts/version-owners.ts`,
+    ).toEqual([]);
   });
 });
 

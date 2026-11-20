@@ -18,7 +18,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:py": "bash tests/compat/run.sh",
-    "test:dbt": "bash tests/dbt/run.sh"
+    "test:dbt": "bash tests/dbt/run.sh",
+    "bump-version": "tsx scripts/bump-version.ts"
   },
   "dependencies": {
     "@duckdb/node-api": "1.4.5-r.1",
