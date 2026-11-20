@@ -196,7 +196,7 @@ flowchart TD
   STRIP --> VERB{"first verb"}
 
   VERB -->|PUT / GET| FT["file-transfer descriptor"]
-  VERB -->|COPY| COPY["COPY INTO via DuckDB readers"]
+  VERB -->|COPY| COPY["COPY INTO via DuckDB readers and writers"]
   VERB -->|LIST / REMOVE| STG["stage directory operations"]
   VERB -->|SHOW / DESCRIBE| META["synthesise Snowflake metadata"]
   VERB -->|USE / ALTER SESSION| CTX["mutate session state"]
@@ -389,8 +389,15 @@ Consequences, stated plainly:
   `SNOWTEST_STAGE_ROOT` back. Files are not persisted by snowtest: a stage holds
   whatever that directory still contains (nothing, with the default temp root).
 
-`COPY INTO` loads CSV, JSON and Parquet through DuckDB's readers. `COPY INTO
-@stage FROM table` (unload) is not implemented.
+`COPY INTO` loads CSV, JSON and Parquet through DuckDB's readers, and unloads
+CSV and Parquet through its writer: `COPY INTO @stage/path FROM table` (or
+`FROM (query)`) writes into the stage directory and answers with
+`rows_unloaded`, `input_bytes` and `output_bytes`. The file is named the way
+Snowflake names it — `data_0_0_0.csv.gz`, or `data` under `SINGLE = TRUE` — but
+there is one file, not one per warehouse thread. Both byte counters report the
+bytes written, since the pre-compression size is not knowable here, and a
+zero-row unload writes no file. `PARTITION BY`, `INCLUDE_QUERY_ID` and JSON
+unloads are refused by name rather than approximated.
 
 ---
 

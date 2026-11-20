@@ -73,9 +73,11 @@ descending `ORDER BY` (so `ROW_NUMBER() … ORDER BY x DESC` keeps the row
 Snowflake keeps), `GREATEST`/`LEAST` return NULL when any argument is NULL,
 `OBJECT_CONSTRUCT` drops SQL-NULL pairs and sorts keys, `PARSE_JSON` fails on
 malformed JSON (`TRY_PARSE_JSON` returns NULL), and `DATEDIFF(week, …)` counts
-Monday boundaries. One known gap is neither: integer division returns a double
-(`1/3` → `0.3333333333333333`, not `0.333333`), and with no rewrite to hook it is
-not reported.
+Monday boundaries. One divergence has no rewrite to hang a note on, because it
+is an operator rather than a function: integer division returns a double (`1/3`
+→ `0.3333333333333333`, not `0.333333`). It is reported whenever both operands
+are integer literals — the only case this pass can type without the catalog — so
+`AMOUNT/2` stays silent instead of guessing at a column's type.
 
 `--fidelity <off|report|strict>` (or `SNOWTEST_FIDELITY`) decides what happens:
 
