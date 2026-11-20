@@ -74,6 +74,18 @@ describe('translation fidelity', () => {
     expect(featuresOf("SELECT CONVERT_TIMEZONE('UTC', TS) AS TIMESTAMP_TZ FROM T")).toEqual(['CONVERT_TIMEZONE']);
   });
 
+  it('reports integer division between literals, and only that shape', () => {
+    expect(featuresOf('SELECT 1/3')).toContain('integer division');
+    expect(featuresOf('SELECT 7 / 2 AS HALF')).toContain('integer division');
+    expect(approximationsOf('SELECT 1/3')[0].detail).toContain('0.333333');
+
+    // A decimal literal already divides in double, a column has a type this pass
+    // cannot see, and a string that contains a slash is not arithmetic.
+    expect(featuresOf('SELECT 1.5/2')).toEqual([]);
+    expect(featuresOf('SELECT AMOUNT/2 FROM T')).toEqual([]);
+    expect(featuresOf("SELECT '1/3'")).toEqual([]);
+  });
+
   it('reports TYPEOF', () => {
     expect(featuresOf('SELECT TYPEOF(V) FROM T')).toEqual(['TYPEOF']);
   });
@@ -190,6 +202,13 @@ describe('fidelity: report', () => {
     expect(model?.verdict).toBe('verified');
     expect(model?.constructs).toEqual([]);
     expect(model?.statements).toBe(2);
+  });
+
+  it('gives integer division a verdict, so the old gap is no longer silent', async () => {
+    await run(server, dbt('model.demo.division', 'SELECT 1/3 AS THIRD'));
+    const model = (await models(server)).models.find((entry) => entry.nodeId === 'model.demo.division');
+    expect(model?.verdict).toBe('approximate');
+    expect(model?.constructs).toEqual(['integer division']);
   });
 
   it('records nothing for a statement that names no model', async () => {

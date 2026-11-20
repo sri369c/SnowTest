@@ -1255,6 +1255,12 @@ export function rewrite(
   // Reads quoted names itself, so it runs before they are masked.
   text = databaseInformationSchema(text, ctx, literal);
   text = maskIdentifiers(text, parts);
+
+  // Integer division is the divergence with no rewrite to hang a note on: the
+  // operator stays an operator. Reported only where both sides are integer
+  // literals — a decimal literal already divides in double, and a column's type is
+  // not knowable here, so `AMOUNT/2` stays silent rather than guessing.
+  reportEach(text, /(?<![\w.])\d+\s*\/\s*\d+(?![\w.])/g, 'integer division', approximations);
   text = sequenceValues(text, parts, literal, ctx);
 
   // `LATERAL FLATTEN(…)` becomes a correlated `json_each` join. It runs before
