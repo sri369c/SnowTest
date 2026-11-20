@@ -112,7 +112,65 @@ check("LIST shows the staged file", list_stage)
 check("COPY INTO loads the staged file", copy_into)
 check("loaded rows are queryable", verify_rows)
 check("GET downloads the file back", get_file)
+def unload_query() -> None:
+    rows = q(
+        "copy into @SNOWTEST.DBT_TEST.STAGED_FILES/unload/ from "
+        "(select * from SNOWTEST.DBT_TEST.STAGED_ORDERS where order_id = 10)"
+    )
+    assert len(rows) == 1, rows
+    columns = [column[0].lower() for column in cur.description]
+    assert columns == ["rows_unloaded", "input_bytes", "output_bytes"], columns
+    assert int(rows[0][0]) == 1, rows
+    assert int(rows[0][2]) > 0, rows
+
+
+def unload_listed() -> None:
+    names = [row[0] for row in q("list @SNOWTEST.DBT_TEST.STAGED_FILES/unload/")]
+    assert any(name.endswith("data_0_0_0.csv.gz") for name in names), names
+
+
+def unload_get_is_gzip() -> None:
+    target = tempfile.mkdtemp()
+    cur.execute(f"get @SNOWTEST.DBT_TEST.STAGED_FILES/unload/ file://{target}/")
+    names = os.listdir(target)
+    assert names, f"GET downloaded nothing into {target}"
+    with open(os.path.join(target, names[0]), "rb") as handle:
+        assert handle.read(2) == b"\x1f\x8b", f"{names[0]} is not gzip"
+
+
+def unload_overwrite() -> None:
+    sql = (
+        "copy into @SNOWTEST.DBT_TEST.STAGED_FILES/unload/ from "
+        "(select * from SNOWTEST.DBT_TEST.STAGED_ORDERS)"
+    )
+    try:
+        q(sql)
+    except Exception as error:  # noqa: BLE001 - the refusal is the assertion
+        assert "already exists" in str(error), error
+    else:
+        raise AssertionError("the second unload replaced the file without OVERWRITE")
+
+    rows = q(sql + " overwrite = true")
+    assert int(rows[0][0]) == 2, rows
+
+
+def unload_zero_rows() -> None:
+    before = len(q("list @SNOWTEST.DBT_TEST.STAGED_FILES/unload/"))
+    rows = q(
+        "copy into @SNOWTEST.DBT_TEST.STAGED_FILES/unload/none/ from "
+        "(select * from SNOWTEST.DBT_TEST.STAGED_ORDERS where order_id = 999)"
+    )
+    assert int(rows[0][0]) == 0, rows
+    after = len(q("list @SNOWTEST.DBT_TEST.STAGED_FILES/unload/"))
+    assert after == before, f"a zero-row unload wrote a file: {before} -> {after}"
+
+
 check("REMOVE clears the stage", remove_file)
+check("COPY INTO @stage unloads a query", unload_query)
+check("LIST shows the unloaded file", unload_listed)
+check("GET brings the gzipped unload back", unload_get_is_gzip)
+check("a second unload needs OVERWRITE", unload_overwrite)
+check("a zero-row unload writes nothing", unload_zero_rows)
 
 print()
 if failures:

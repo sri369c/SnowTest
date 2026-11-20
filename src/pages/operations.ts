@@ -726,6 +726,13 @@ export const GROUPS: OperationGroup[] = [
         status: 'supported',
         since: '1.0.0',
       },
+      {
+        syntax: 'COPY INTO @stage/path FROM <table | (query)>',
+        behaviour: 'Unloads CSV and Parquet through DuckDB, honouring `TYPE`, `COMPRESSION`, `HEADER`, `FIELD_DELIMITER`, `FIELD_OPTIONALLY_ENCLOSED_BY`, `NULL_IF`, `SINGLE` and `OVERWRITE`.',
+        status: 'supported',
+        since: '5.2.0',
+        note: 'One file, not one per warehouse thread: the name Snowflake would give it is reproduced (`data_0_0_0.csv.gz`), the parallelism is not. `input_bytes` and `output_bytes` both report the bytes written. CSV is unquoted unless `FIELD_OPTIONALLY_ENCLOSED_BY` names a character, which is what Snowflake writes for `NONE`.',
+      },
     ],
   },
 ];
@@ -762,10 +769,6 @@ export const UNSUPPORTED: UnsupportedFeature[] = [
   {
     feature: 'Table functions other than FLATTEN',
     outcome: '`LATERAL FLATTEN` and `TABLE(FLATTEN(…))` are translated; `GENERATOR`, `RESULT_SCAN` and user table functions are not.',
-  },
-  {
-    feature: 'Unloading: COPY INTO @stage',
-    outcome: '`COPY INTO` only loads into a table; the reverse direction returns a Snowflake error.',
   },
   {
     feature: 'GET /api/v2/statements?statement=…',
