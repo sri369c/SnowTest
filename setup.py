@@ -87,6 +87,7 @@ examples:
   ./setup.py redeploy --no-rebuild   # restart on the image already tagged
   ./setup.py redeploy --no-recreate  # keep the container; rebuild and seed only
   ./setup.py redeploy --no-seed-examples   # skip loading the bundled example tables
+  ./setup.py redeploy --no-verify    # skip the self test that runs after seeding
   ./setup.py redeploy --public-key keys/rsa_key.pub --users DBT_SVC
   ./setup.py redeploy --port 9090 --write-profile ./dbt_project
   ./setup.py up --name team-a --port 3131 --network team-a-net   # a second, isolated instance
@@ -518,6 +519,52 @@ def load_examples(args: argparse.Namespace) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# self test
+# --------------------------------------------------------------------------- #
+
+
+def verify_instance(args: argparse.Namespace) -> None:
+    """Ask the instance to check itself, and stop if it says no.
+
+    The self test drives the same endpoints a client uses, so a pass is about the
+    container that was just started rather than about the tree it was built from.
+    It writes to a scratch database it drops again, apart from two rows in the
+    fidelity ledger under `model.snowtest_selfcheck.*`.
+    """
+    if not args.verify:
+        return
+    url = base_url(args) + "/_snowtest/self-test"
+    if args.dry_run:
+        note(f"  # POST {url}, and fail if any check does")
+        return
+    note("verifying the instance with its own self test")
+    try:
+        report = http_json(url, method="POST", payload={}, timeout=120.0)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")[:300]
+        if exc.code == 409:
+            # Another run holds the latch. That is not a pass: nothing was checked.
+            die(f"could not verify: a self test is already running ({detail})")
+        die(f"the self test did not run: HTTP {exc.code} {detail}")
+    except (urllib.error.URLError, OSError) as exc:
+        die(f"the self test did not run: {exc}")
+
+    checks = report.get("checks") or []
+    if not checks:
+        die(f"the self test returned no report: {json.dumps(report)[:300]}")
+    for check in checks:
+        if check.get("ok"):
+            continue
+        note(f"  FAIL  {check.get('name', '?')}: {check.get('passed', '?')}/{check.get('total', '?')} "
+             f"{check.get('detail', '')}")
+    if not report.get("ok"):
+        die(f"the self test failed: {report.get('failedChecks', '?')} of {len(checks)} checks, "
+            f"{report.get('passed', '?')}/{report.get('total', '?')} assertions")
+    note(f"  {report.get('passed')}/{report.get('total')} assertions in {len(checks)} checks "
+         f"({report.get('durationMs', '?')} ms)")
+
+
+# --------------------------------------------------------------------------- #
 # profile output
 # --------------------------------------------------------------------------- #
 
@@ -678,6 +725,9 @@ def cmd_redeploy(args: argparse.Namespace) -> int:
     else:
         note("the catalog is in memory, so this instance starts empty")
     seed_examples(args)
+    # Before the summary: a build that fails its own checks should end on the
+    # failure, not on a banner saying it is up.
+    verify_instance(args)
     print_summary(args, stage, health)
     maybe_write_profile(args)
     return 0
@@ -847,6 +897,9 @@ def build_parser() -> argparse.ArgumentParser:
     redeploy.add_argument("--no-cache", action="store_true", help="ignore the build cache")
     redeploy.add_argument("--keep-stages", action="store_true",
                           help="keep staged files instead of clearing them")
+    redeploy.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True,
+                          help="run the instance's self test after seeding and fail if a check "
+                               "fails (default: on)")
     redeploy.add_argument("--write-profile", default=None, metavar="DIR",
                           help="write DIR/profiles.yml for dbt")
     redeploy.add_argument("--force", action="store_true", help="overwrite an existing profiles.yml")
