@@ -66,6 +66,13 @@ const GROUPS = [
     features: ['ARRAY_CONSTRUCT'],
     detail: 'NULL element: DuckDB keeps NULL, Snowflake stores undefined',
   },
+  {
+    // An operator, not a call: there is no rewrite to hang the note on, and the
+    // value itself is not fixed either. Reported only for two integer literals,
+    // the one case this pass can type without asking the catalog.
+    features: ['integer division'],
+    detail: 'DuckDB divides in double precision: 1/3 is 0.3333333333333333 where Snowflake returns 0.333333',
+  },
 ] as const;
 
 export type ApproximatedFeature = (typeof GROUPS)[number]['features'][number];

@@ -1,6 +1,6 @@
 {
   "name": "snowtest",
-  "version": "5.1.0",
+  "version": "5.2.0",
   "description": "A Snowflake-compatible stub server for testing systems that expect a real Snowflake account.",
   "license": "MIT",
   "type": "module",
@@ -18,7 +18,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:py": "bash tests/compat/run.sh",
-    "test:dbt": "bash tests/dbt/run.sh"
+    "test:dbt": "bash tests/dbt/run.sh",
+    "bump-version": "tsx scripts/bump-version.ts"
   },
   "dependencies": {
     "@duckdb/node-api": "1.4.5-r.1",

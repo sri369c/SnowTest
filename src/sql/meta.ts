@@ -12,7 +12,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { mkdir, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import { Catalog, normalizeName } from '../engine/catalog.js';
 import { rewrite, splitColumnListCtas, toSqlLiteral, type ApproximationSink, type ColumnListCtas, type RewriteContext } from './dialect.js';
@@ -525,7 +526,7 @@ export class StatementRouter {
     }
     if (verb === 'PUT') return this.handlePut(statement, session);
     if (verb === 'GET') return this.handleGet(statement, session);
-    if (verb === 'COPY') return this.handleCopyInto(statement, session);
+    if (verb === 'COPY') return this.handleCopyInto(statement, session, options);
     if (verb === 'LIST' || verb === 'LS') return this.handleList(statement, session);
     if (verb === 'REMOVE' || verb === 'RM') return this.handleRemove(statement, session);
     if (verb === 'SHOW') return this.handleShow(statement, session);
@@ -2106,12 +2107,205 @@ export class StatementRouter {
     return { database: currentDatabase(session), schema: currentSchema(session), name, filePath };
   }
 
-  private async handleCopyInto(statement: string, session: Session): Promise<Outcome> {
+  /**
+   * `COPY INTO @stage/<path> FROM <table|(query)>`: the reverse direction.
+   *
+   * Snowflake writes the file and answers with one row of three counters. DuckDB
+   * writes it here, into the stage directory the same `PUT`/`GET` handshake uses,
+   * through the options the load path reads back — and the file is named the way
+   * Snowflake names it, because a test asserts on that name.
+   */
+  private async handleUnload(
+    reference: string,
+    parsed: { source: string; rest: string },
+    session: Session,
+    options: ExecuteOptions,
+  ): Promise<Outcome> {
+    const cleaned = reference.trim().replace(/^'|'$/g, '');
+    // `@~` and `@%table` are user and table stages: there is no directory behind them here.
+    if (/^@\s*[~%]/.test(cleaned)) throw unsupported('Unloading to a user or table stage (@~ or @%table)');
+
+    const stageRef = this.resolveStageRef(session, reference);
+    const rest = parsed.rest;
+
+    if (/\bpartition\s+by\b/i.test(rest)) throw unsupported('PARTITION BY on COPY INTO @stage');
+    if (/\bdetaile?d_output\s*=\s*true/i.test(rest)) {
+      throw unsupported('DETAILED_OUTPUT = TRUE on COPY INTO @stage');
+    }
+    if (/\binclude_query_id\s*=\s*true/i.test(rest)) {
+      throw unsupported('INCLUDE_QUERY_ID = TRUE on COPY INTO @stage');
+    }
+
+    const type = (/\btype\s*=\s*'?(\w+)'?/i.exec(rest)?.[1] ?? 'csv').toLowerCase();
+    if (type !== 'csv' && type !== 'parquet') throw unsupported(`Unloading as ${type.toUpperCase()}`);
+
+    const compression = (/\bcompression\s*=\s*'?(\w+)'?/i.exec(rest)?.[1] ?? 'auto').toLowerCase();
+    const gzip = type === 'csv' && (compression === 'auto' || compression === 'gzip');
+    if (type === 'csv' && !gzip && compression !== 'none') {
+      throw unsupported(`Unloading CSV with COMPRESSION = ${compression.toUpperCase()}`);
+    }
+    const parquetCompression =
+      compression === 'none' ? 'uncompressed' : compression === 'auto' || compression === 'snappy' ? 'snappy' : null;
+    if (type === 'parquet' && parquetCompression === null) {
+      throw unsupported(`Unloading Parquet with COMPRESSION = ${compression.toUpperCase()}`);
+    }
+
+    const overwrite = /\boverwrite\s*=\s*true\b/i.test(rest);
+    const single = /\bsingle\s*=\s*true\b/i.test(rest);
+    const extension = type === 'parquet' ? 'parquet' : gzip ? 'csv.gz' : 'csv';
+
+    // A path segment with a dot is a file name; anything else is a prefix the
+    // generated name is written under. Snowflake names a single file `data` and a
+    // parallel unload `data_0_0_0.<ext>`.
+    const prefix = stageRef.filePath.replace(/^\/+|\/+$/g, '');
+    const namedInPath = prefix !== '' && (prefix.split('/').pop() ?? '').includes('.');
+    const namedInOption = /\b(?:file_name|name)\s*=\s*'([^']+)'/i.exec(rest)?.[1] ?? null;
+
+    let relative: string;
+    if (namedInOption !== null) relative = namedInOption;
+    else if (namedInPath) relative = prefix;
+    else if (single) relative = prefix === '' ? 'data' : `${prefix}/data`;
+    else relative = prefix === '' ? `data_0_0_0.${extension}` : `${prefix}/data_0_0_0.${extension}`;
+
+    const directory = await this.stages.directoryFor(stageRef.database, stageRef.schema, stageRef.name);
+    const target = this.stageWriteTarget(directory, relative);
+
+    const selection = parsed.source;
+    const fromClause = selection.startsWith('(') ? selection : `select * from ${selection}`;
+    // The source query is Snowflake SQL like any other, so it is translated the
+    // same way — and reports what it approximated, as a SELECT would.
+    const query = rewrite(fromClause, this.rewriteContext(session), options.bindings ?? [], options.notes);
+
+    const connection = await this.connectionFor(session);
+    const counted = await connection.execute(`select count(*) from (${query})`);
+    const rowsUnloaded = Number(counted.rows[0]?.[0] ?? 0);
+
+    const columns: ColumnSpec[] = [
+      { name: 'rows_unloaded', duckType: 'BIGINT' },
+      { name: 'input_bytes', duckType: 'BIGINT' },
+      { name: 'output_bytes', duckType: 'BIGINT' },
+    ];
+
+    // Zero rows writes no file, exactly as Snowflake does.
+    if (rowsUnloaded === 0) return syntheticOutcome(columns, [[0, 0, 0]], STATEMENT_TYPES.copy);
+
+    if (!overwrite && (await this.fileSize(target.absolute)) !== null) {
+      throw compilationError(
+        `File '${target.relative}' already exists on stage '${stageRef.name}'. Use OVERWRITE = TRUE to replace it.`,
+      );
+    }
+
+    await mkdir(dirname(target.absolute), { recursive: true });
+    await connection.execute(
+      `COPY (${query}) TO ${toSqlLiteral(target.absolute)} (${this.unloadFormat(type, rest, gzip, parquetCompression)})`,
+    );
+
+    // A stub cannot know the pre-compression stream size, so both counters report
+    // the bytes written; the file on disk is the honest evidence.
+    const size = (await this.fileSize(target.absolute)) ?? 0;
+    return syntheticOutcome(columns, [[rowsUnloaded, size, size]], STATEMENT_TYPES.copy);
+  }
+
+  /**
+   * Split an unload's `FROM` clause into its source and the options after it.
+   *
+   * The source can be a query with parentheses of its own, so the close is found
+   * by depth instead of by a regex that would stop at the first `)`.
+   */
+  private unloadSource(body: string): { source: string; rest: string } {
+    const text = body.trimStart();
+    if (!text.startsWith('(')) {
+      const name = /^[\w$".]+/.exec(text);
+      if (!name) throw compilationError('Unsupported COPY statement: expected FROM <table> or FROM (query).');
+      return { source: name[0], rest: text.slice(name[0].length) };
+    }
+
+    let depth = 0;
+    let quote: string | null = null;
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i];
+      if (quote !== null) {
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+      } else if (ch === '(') {
+        depth += 1;
+      } else if (ch === ')') {
+        depth -= 1;
+        if (depth === 0) return { source: text.slice(0, i + 1), rest: text.slice(i + 1) };
+      }
+    }
+    throw compilationError('Unsupported COPY statement: the source query is not closed.');
+  }
+
+  /** The DuckDB `COPY … TO` option list for a Snowflake unload. */
+  private unloadFormat(
+    type: 'csv' | 'parquet',
+    rest: string,
+    gzip: boolean,
+    parquetCompression: string | null,
+  ): string {
+    if (type === 'parquet') return `FORMAT PARQUET, COMPRESSION ${parquetCompression}`;
+
+    const parts = ['FORMAT CSV'];
+    if (gzip) parts.push('COMPRESSION gzip');
+    if (/\bheader\s*=\s*(?:true|1)\b/i.test(rest)) parts.push('HEADER true');
+    const delimiter = /\bfield_delimiter\s*=\s*'([^']*)'/i.exec(rest)?.[1];
+    if (delimiter !== undefined) parts.push(`DELIMITER ${toSqlLiteral(delimiter)}`);
+    // Snowflake's unload default is NONE: nothing is quoted, not even a value that
+    // holds the delimiter. DuckDB has to be told that with an empty QUOTE.
+    const enclosed = /\bfield_optionally_enclosed_by\s*=\s*'([^']*)'/i.exec(rest)?.[1];
+    const quote = enclosed === undefined || enclosed.toUpperCase() === 'NONE' ? '' : enclosed;
+    parts.push(`QUOTE ${toSqlLiteral(quote)}`);
+    // The first NULL_IF value is the one written; the rest are for reading.
+    const nullIf = /\bnull_if\s*=\s*(?:\(\s*)?'([^']*)'/i.exec(rest)?.[1];
+    if (nullIf !== undefined && nullIf !== '') parts.push(`NULL ${toSqlLiteral(nullIf)}`);
+    return parts.join(', ');
+  }
+
+  /**
+   * Absolute path for a file this router is about to write onto a stage.
+   *
+   * This is the one place a client's text becomes a path inside the stage, so the
+   * segments are checked here: `..`, an empty segment, a drive letter or a
+   * backslash all name something outside the directory (see stage.ts).
+   */
+  private stageWriteTarget(directory: string, relative: string): { absolute: string; relative: string } {
+    const segments = relative.split('/').filter((segment) => segment.length > 0);
+    const invalid =
+      segments.length === 0 ||
+      segments.some((segment) => segment === '.' || segment === '..' || /[\\:]/.test(segment));
+    if (invalid) {
+      throw compilationError(`Invalid unload path '${relative}': it must name a file inside the stage.`);
+    }
+    return { absolute: join(directory, ...segments), relative: segments.join('/') };
+  }
+
+  /** Size of an existing file, or null when there is nothing there. */
+  private async fileSize(path: string): Promise<number | null> {
+    try {
+      return (await stat(path)).size;
+    } catch {
+      return null;
+    }
+  }
+
+  private async handleCopyInto(statement: string, session: Session, options: ExecuteOptions): Promise<Outcome> {
+    // `COPY INTO @stage/… FROM …` is the reverse direction: Snowflake unloads.
+    const unload = /^copy\s+into\s+(@[^\s(]+|'@[^']*')\s+from\s+/i.exec(statement);
+    if (unload) {
+      const parsed = this.unloadSource(statement.slice(unload[0].length));
+      return this.handleUnload(unload[1], parsed, session, options);
+    }
+
     const match = /^copy\s+into\s+([\w$".]+)\s+from\s+(@[^\s]+|'[^']*')([\s\S]*)$/i.exec(statement);
     if (!match) {
       throw compilationError(
-        'Unsupported COPY statement. Snowtest loads from a stage: ' +
-          'COPY INTO <table> FROM @stage/<path> FILE_FORMAT = (TYPE = CSV SKIP_HEADER = 1).',
+        'Unsupported COPY statement. Snowtest loads with: ' +
+          'COPY INTO <table> FROM @stage/<path> FILE_FORMAT = (TYPE = CSV SKIP_HEADER = 1), and unloads with: ' +
+          'COPY INTO @stage/<path> FROM <table|(query)> FILE_FORMAT = (TYPE = CSV).',
       );
     }
 
@@ -2130,7 +2324,7 @@ export class StatementRouter {
 
     const pattern = /pattern\s*=\s*'([^']*)'/i.exec(rest)?.[1] ?? null;
     const purge = /purge\s*=\s*true/i.test(rest);
-    const options = this.copyOptions(rest);
+    const format = this.copyOptions(rest);
 
     const files = (await this.stages.list(directory, pattern)).filter((file) =>
       this.stagePathMatches(file.name, stageRef.filePath),
@@ -2146,7 +2340,7 @@ export class StatementRouter {
     const rows: unknown[][] = [];
 
     for (const file of files) {
-      const reader = this.stageReader(file.name, join(directory, file.name), options);
+      const reader = this.stageReader(file.name, join(directory, file.name), format);
       const result = await connection.execute(`INSERT INTO ${match[1]} SELECT * FROM ${reader}`);
       rows.push([
         `${stageRef.name}/${file.name}`,

@@ -2,7 +2,8 @@
 # Copyright (c) 2026 Srinivas Chaturvedula
 
 # End-to-end check: dbt-snowflake authenticating with an RSA key pair against
-# snowtest, then running view / table / incremental models and schema tests.
+# snowtest, then running view / table / incremental models, the Snowflake table
+# configs, schema tests, snapshots, source freshness, docs and the stage cycle.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -137,12 +138,40 @@ step() {
   return 0
 }
 
+# The inverse of `step`: a non-zero exit is the pass. It exists for checks whose
+# whole point is that something is refused, so a silent regression cannot look
+# like a green run.
+expect_failure() {
+  local name="$1"
+  shift
+  echo ""
+  echo "=== ${name} (expected to fail) ==="
+  if "$@"; then
+    FAILED=$((FAILED + 1))
+    echo ">>> ${name} FAILED: expected a non-zero exit, got 0"
+  else
+    echo "ok   - ${name} failed as expected"
+  fi
+  return 0
+}
+
 step "dbt debug (key-pair login + select 1)" "$DBT" debug "${DBT_ARGS[@]}"
+# Before the first run, not after: the append model gains three rows on every
+# run, so it has to start from nothing rather than from a previous run's rows.
+step "fixture: raw tables, clean append and snapshot baseline" "$PY" tests/dbt/fixture.py init
 step "dbt run #1 (view + table + incremental create)" "$DBT" run "${DBT_ARGS[@]}"
 step "dbt run #2 (incremental merge path)" "$DBT" run "${DBT_ARGS[@]}"
 step "dbt seed (create + INSERT OVERWRITE with bindings)" "$DBT" seed "${DBT_ARGS[@]}"
 step "dbt seed again (overwrite must not duplicate rows)" "$DBT" seed "${DBT_ARGS[@]}"
 step "dbt test (not_null / unique)" "$DBT" test "${DBT_ARGS[@]}"
+step "dbt snapshot #1 (timestamp and check strategies, first version)" "$DBT" snapshot "${DBT_ARGS[@]}"
+step "fixture: change one row in each raw table" "$PY" tests/dbt/fixture.py mutate
+step "dbt snapshot #2 (a second version is recorded)" "$DBT" snapshot "${DBT_ARGS[@]}"
+step "dbt source freshness (fresh rows pass)" "$DBT" source freshness "${DBT_ARGS[@]}"
+step "fixture: age every raw row" "$PY" tests/dbt/fixture.py stale
+expect_failure "dbt source freshness refuses a stale source" "$DBT" source freshness "${DBT_ARGS[@]}"
+step "dbt docs generate (catalog read over the wire)" "$DBT" docs generate "${DBT_ARGS[@]}"
+step "dbt run-operation (run_query over the wire)" "$DBT" run-operation row_count --args '{table_name: SNOWTEST.DBT_TEST.STG_ORDERS, expected: 3}' "${DBT_ARGS[@]}"
 step "query results back over the driver protocol" "$PY" tests/dbt/verify.py
 step "staged files (PUT / LIST / COPY INTO / GET)" "$PY" tests/dbt/stage_test.py
 
