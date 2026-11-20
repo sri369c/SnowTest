@@ -7,9 +7,15 @@
  * image keeps carrying nothing but `dist/`, which means both of them need the
  * same head, the same stylesheet and the same escaping rules. One copy here,
  * imported by every page renderer, keeps them from drifting apart.
+ *
+ * Colour comes from tokens on `:root`, and a theme redefines only tokens: no
+ * rule below names a colour, so a palette is one block. The theme is a reader's
+ * preference, not the server's, so it lives in `sessionStorage` — a reload keeps
+ * it, a closed tab forgets it, and nothing about it is ever sent anywhere.
  */
 
 import { PACKAGE_VERSION } from '../config/version.js';
+import { DEFAULT_THEME, renderThemeControl, THEME_SCRIPT, THEME_STYLES } from './themes.js';
 
 /** Escape text for HTML text nodes and attribute values. */
 export function escapeHtml(value: string): string {
@@ -28,149 +34,129 @@ export function inlineMarkup(value: string): string {
 }
 
 const STYLES = `
-  :root { color-scheme: light dark; scrollbar-gutter: stable; }
+  :root { scrollbar-gutter: stable; }
   * { box-sizing: border-box; }
   body {
     margin: 0 auto; padding: 2.5rem 1.25rem 4rem; max-width: 64rem;
     font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    color: #1b1f24; background: #fff;
-  }
-  @media (prefers-color-scheme: dark) {
-    body { color: #e6edf3; background: #0d1117; }
-    code, pre { background: #161b22 !important; border-color: #30363d !important; }
-    th, td { border-color: #30363d !important; }
-    .card { background: #161b22 !important; border-color: #30363d !important; }
-    a { color: #6cb6ff; }
+    color: var(--fg); background: var(--bg);
   }
   h1 { font-size: 1.9rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
   h2 { font-size: 1.15rem; margin: 2.25rem 0 .75rem; }
   h3 { font-size: .95rem; margin: 1.5rem 0 .4rem; }
-  .muted { color: #57606a; font-size: .9rem; }
+  .muted { color: var(--muted); font-size: .9rem; }
   p { margin: .6rem 0; }
   .tag { display: inline-block; font-size: .75rem; letter-spacing: .04em;
-         text-transform: uppercase; color: #57606a; margin-bottom: .5rem; }
-  .lede { font-size: 1.02rem; color: #57606a; }
-  .card { border: 1px solid #d0d7de; border-radius: 8px; padding: 1rem 1.15rem;
-          background: #f6f8fa; margin: 1.25rem 0; }
+         text-transform: uppercase; color: var(--muted); margin-bottom: .5rem; }
+  .lede { font-size: 1.02rem; color: var(--muted); }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.15rem;
+          background: var(--surface); margin: 1.25rem 0; }
   table { border-collapse: collapse; width: 100%; font-size: .92rem; }
-  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #d0d7de;
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--border);
            vertical-align: top; }
   th { font-weight: 600; }
   td:first-child { white-space: nowrap; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-         font-size: .875em; background: #f6f8fa; border: 1px solid #d0d7de;
+         font-size: .875em; background: var(--surface); border: 1px solid var(--border);
          border-radius: 5px; padding: .1rem .3rem; }
-  pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px;
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
         padding: .85rem 1rem; overflow-x: auto; font-size: .85rem; line-height: 1.5; }
   pre code { background: none; border: 0; padding: 0; font-size: inherit; }
   ul { margin: .5rem 0; padding-left: 1.2rem; }
   li { margin: .25rem 0; }
-  a { color: #0969da; }
-  a.endpoint, button.endpoint { color: #0969da; text-decoration: none; }
+  a { color: var(--link); }
+  a.endpoint, button.endpoint { color: var(--link); text-decoration: none; }
   a.endpoint code, button.endpoint code { color: inherit; }
-  a.endpoint:hover code, button.endpoint:hover code { border-color: #0969da; }
+  a.endpoint:hover code, button.endpoint:hover code { border-color: var(--link); }
   button.endpoint { font: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
-  .warn { border-left: 3px solid #bf8700; padding-left: .9rem; color: #57606a; }
-  footer { margin-top: 3rem; font-size: .85rem; color: #57606a; }
+  .warn { border-left: 3px solid var(--warn); padding-left: .9rem; color: var(--muted); }
+  footer { margin-top: 3rem; font-size: .85rem; color: var(--muted); }
 
-  /* Site header: version tag above the page nav. */
-  .toptag { font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; color: #57606a;
-            margin: -1.25rem 0 .75rem; }
+  /* Site header: version tag above the page nav, theme control at its right end. */
+  .toptag { display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+            flex-wrap: wrap; font-size: .72rem; letter-spacing: .04em; text-transform: uppercase;
+            color: var(--muted); margin: -1.25rem 0 .75rem; }
   .topnav { display: flex; flex-wrap: wrap; gap: 0 1.25rem; font-size: .9rem; margin: 0 0 1.5rem;
-            padding-bottom: .5rem; border-bottom: 1px solid #d0d7de; }
-  .topnav a { text-decoration: none; color: #57606a; }
+            padding-bottom: .5rem; border-bottom: 1px solid var(--border); }
+  .topnav a { text-decoration: none; color: var(--muted); }
   .topnav a[aria-current] { color: inherit; font-weight: 600; }
   .crumb { font-size: .88rem; margin: 0 0 .75rem; }
 
   /* Tabs. Panels stay visible until the script runs, so nothing hides without JS. */
-  .tabs { display: flex; flex-wrap: wrap; gap: .15rem; border-bottom: 1px solid #d0d7de;
+  .tabs { display: flex; flex-wrap: wrap; gap: .15rem; border-bottom: 1px solid var(--border);
           margin: 1.75rem 0 1rem; }
   .tabs.dense { gap: 0; font-size: .9rem; }
   .tabs.sub { margin: .5rem 0 .75rem; font-size: .9rem; }
   .tab { font: inherit; color: inherit; background: none; cursor: pointer; padding: .35rem .8rem;
          margin-bottom: -1px; border: 1px solid transparent; border-radius: 6px 6px 0 0; }
   .tabs.dense .tab { padding: .35rem .55rem; }
-  .tab:hover { background: #f6f8fa; }
+  .tab:hover { background: var(--surface); }
   a.tab { text-decoration: none; }
-  .tab[aria-selected="true"], .tab[aria-current] { border-color: #0969da; border-bottom: 2px solid #0969da;
-                               color: #0969da; border-radius: 6px; }
+  .tab[aria-selected="true"], .tab[aria-current] { border-color: var(--link);
+                               border-bottom: 2px solid var(--link); color: var(--link);
+                               border-radius: 6px; }
   .panehead { margin: .5rem 0 .25rem; font-size: 1.05rem; display: flex; align-items: center; gap: .5rem; }
   .badge { display: inline-block; font-size: .72rem; line-height: 1.4; padding: 0 .4rem;
-           border-radius: 999px; background: #eaeef2; color: #57606a; font-weight: 600; }
-  .rn { width: 2.5rem; text-align: right; color: #57606a; font-variant-numeric: tabular-nums; }
-  .since { width: 7rem; white-space: nowrap; color: #57606a; font-variant-numeric: tabular-nums; }
+           border-radius: 999px; background: var(--badge-bg); color: var(--badge-fg); font-weight: 600; }
+  .rn { width: 2.5rem; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .since { width: 7rem; white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
   .livebar { display: flex; align-items: center; justify-content: flex-end; gap: .6rem; margin: .25rem 0; }
   .livebar .muted { font-size: .8rem; }
   .refresh { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .85rem;
-             cursor: pointer; color: #0969da; background: none; border: 1px solid #d0d7de;
+             cursor: pointer; color: var(--link); background: none; border: 1px solid var(--border);
              border-radius: 6px; padding: .2rem .6rem; }
-  .refresh.danger { color: #b42318; }
-  .refresh.danger:hover { border-color: #b42318; background: #fff5f5; }
+  .refresh.danger { color: var(--danger-fg); }
+  .refresh.danger:hover { border-color: var(--danger-fg); background: var(--danger-hover); }
   .refresh:disabled { cursor: not-allowed; opacity: .5; }
-  .ok { border: 1px solid #1a7f37; background: #f0fff4; color: #1a7f37; border-radius: 6px;
-        padding: .5rem .75rem; margin: 0 0 .9rem; }
+  .ok { border: 1px solid var(--ok-border); background: var(--ok-bg); color: var(--ok-fg);
+        border-radius: 6px; padding: .5rem .75rem; margin: 0 0 .9rem; }
   .action { display: flex; align-items: flex-start; justify-content: space-between; gap: 1.5rem;
-            border-top: 1px solid #d0d7de; padding: 1rem 0; }
+            border-top: 1px solid var(--border); padding: 1rem 0; }
   .action h3 { margin: 0 0 .3rem; }
   .action p { margin: 0; }
   .action-controls { display: flex; align-items: center; gap: .4rem; flex: 0 0 auto; }
   .modal { width: min(30rem, calc(100vw - 2rem)); padding: 1.1rem 1.25rem;
-           border: 1px solid #d0d7de; border-radius: 10px; background: #ffffff; color: inherit;
-           box-shadow: 0 12px 32px rgba(31, 35, 40, .18); }
-  .modal::backdrop { background: rgba(31, 35, 40, .35); }
+           border: 1px solid var(--border); border-radius: 10px; background: var(--modal-bg);
+           color: inherit; box-shadow: 0 12px 32px var(--overlay); }
+  .modal::backdrop { background: var(--overlay); }
   .modal h3 { margin: 0 0 .5rem; }
   .modal p { margin: 0 0 .9rem; }
   .modal label { display: block; margin-bottom: .35rem; }
   .modal input { font: inherit; font-size: .9rem; padding: .3rem .55rem; width: 100%; box-sizing: border-box;
-                 border: 1px solid #d0d7de; border-radius: 6px; }
+                 border: 1px solid var(--border); border-radius: 6px; background: var(--input-bg);
+                 color: inherit; }
   .modal-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
   /* Narrow enough that the timings table fits without scrolling sideways,
      wide enough to still read a statement. */
   td.sql { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .refresh:hover { background: #f6f8fa; border-color: #0969da; }
+  .refresh:hover { background: var(--surface); border-color: var(--link); }
   .refresh svg { width: 14px; height: 14px; }
   .refresh.busy svg { animation: spin .8s linear infinite; }
-  .refresh.err { color: #b42318; border-color: #b42318; }
+  .refresh.err { color: var(--danger-fg); border-color: var(--danger-fg); }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (prefers-color-scheme: dark) {
-    .ok { background: #12261e; border-color: #2ea043; color: #3fb950; }
-    .modal { background: #161b22; border-color: #30363d; }
-    .modal input { background: #0d1117; color: inherit; border-color: #30363d; }
-    .action { border-color: #30363d; }
-    .tabs, .topnav { border-color: #30363d; }
-    .tab:hover, .refresh:hover { background: #161b22; }
-    .tab[aria-selected="true"], .tab[aria-current] { border-color: #6cb6ff; color: #6cb6ff; }
-    .badge { background: #30363d; color: #9da7b3; }
-    .refresh { color: #6cb6ff; border-color: #30363d; }
-  }
 
   .ops td:first-child { white-space: normal; }
-  .ops thead th { position: sticky; top: 0; z-index: 1; background: #fff; }
-  @media (prefers-color-scheme: dark) { .ops thead th { background: #0d1117; } }
+  .ops thead th { position: sticky; top: 0; z-index: 1; background: var(--bg); }
   .ops h2 { scroll-margin-top: 1rem; }
-  .note { display: block; color: #57606a; font-size: .82rem; margin-top: .15rem; }
+  .note { display: block; color: var(--muted); font-size: .82rem; margin-top: .15rem; }
   /* A row's gap is the part people need to read, so it gets a callout block
      instead of smaller grey text. Scoped to the operations tables: the catalog
      browser uses the same class for column-type hints, where this is noise. */
   .ops .note {
-    background: #eef1f4; border-left: 3px solid #8c959f; border-radius: 4px;
-    padding: .3rem .55rem; color: #24292f; margin-top: .3rem;
+    background: var(--note-bg); border-left: 3px solid var(--note-border); border-radius: 4px;
+    padding: .3rem .55rem; color: var(--note-fg); margin-top: .3rem;
   }
-  @media (prefers-color-scheme: dark) {
-    .ops .note { background: #161b22; border-left-color: #6e7681; color: #c9d1d9; }
-  }
-  .null { color: #57606a; font-style: italic; }
+  .null { color: var(--muted); font-style: italic; }
   .scroller { overflow-x: auto; margin: 1.25rem 0; }
   .scroller table { min-width: 100%; }
   .scroller td { white-space: nowrap; }
 
   /* Vertical cap for the data tables: twelve rows, then a scrollbar. The header
      sticks, so a scrolled table never loses its column names. */
-  .vscroll { max-height: 22rem; overflow-y: auto; border: 1px solid #d0d7de; border-radius: 8px; }
-  .vscroll thead th { position: sticky; top: 0; z-index: 1; background: #fff; }
-  .vscroll .empty { color: #57606a; font-style: italic; padding: 1.25rem .6rem; }
-  @media (prefers-color-scheme: dark) { .vscroll thead th { background: #0d1117; } }
+  .vscroll { max-height: 22rem; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .vscroll thead th { position: sticky; top: 0; z-index: 1; background: var(--bg); }
+  .vscroll .empty { color: var(--muted); font-style: italic; padding: 1.25rem .6rem; }
 
   /* The timings chart. Inline SVG, so each part is one class and no library. */
   .charthead { display: flex; align-items: baseline; justify-content: space-between;
@@ -180,45 +166,34 @@ const STYLES = `
   .chartwrap { position: relative; margin: .5rem 0 .25rem; }
   .chartwrap svg { display: block; width: 100%; height: auto; overflow: visible; }
   .chartwrap .hit { fill: transparent; cursor: pointer; }
-  .chartwrap .hit:hover { fill: rgba(9, 105, 218, .08); }
-  .chartwrap .hit:focus-visible { fill: rgba(9, 105, 218, .08); outline: 1px solid #0969da; }
+  .chartwrap .hit:hover { fill: var(--chart-focus); }
+  .chartwrap .hit:focus-visible { fill: var(--chart-focus); outline: 1px solid var(--link); }
   .chartwrap .grid { stroke: currentColor; stroke-opacity: .12; }
-  .axis { fill: #57606a; font-size: 10px; font-family: inherit; }
-  .chartline { fill: none; stroke: #0969da; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-  .chartarea { fill: #0969da; fill-opacity: .12; }
-  .chartdot { fill: #0969da; }
-  .band { fill: rgba(9, 105, 218, .14); pointer-events: none; }
+  .axis { fill: var(--muted); font-size: 10px; font-family: inherit; }
+  .chartline { fill: none; stroke: var(--chart); stroke-width: 2; stroke-linejoin: round;
+               stroke-linecap: round; }
+  .chartarea { fill: var(--chart); fill-opacity: .12; }
+  .chartdot { fill: var(--chart); }
+  .band { fill: var(--chart-band); pointer-events: none; }
   .dayline { stroke: currentColor; stroke-opacity: .22; stroke-dasharray: 2 3; }
   .tooltip { position: absolute; transform: translate(-50%, -100%); pointer-events: none;
-             background: #1b1f24; color: #fff; font-size: .78rem; line-height: 1.35;
-             padding: .3rem .5rem; border-radius: 6px; white-space: nowrap; z-index: 2; }
+             background: var(--tooltip-bg); color: var(--tooltip-fg); font-size: .78rem;
+             line-height: 1.35; padding: .3rem .5rem; border-radius: 6px; white-space: nowrap;
+             z-index: 2; }
   .chip { display: inline-flex; align-items: center; gap: .5rem; font-size: .85rem;
-          border: 1px solid #0969da; color: #0969da; border-radius: 999px;
+          border: 1px solid var(--link); color: var(--link); border-radius: 999px;
           padding: .1rem .3rem .1rem .7rem; margin: 0 0 .75rem; }
   .chip a { color: inherit; text-decoration: none; padding: .15rem .35rem; }
   /* An author display rule beats the UA rule for [hidden]; say it again. */
   .chip[hidden] { display: none; }
-  @media (prefers-color-scheme: dark) {
-    .chartline { stroke: #6cb6ff; }
-    .chartarea { fill: #6cb6ff; }
-    .chartdot { fill: #6cb6ff; }
-    .axis { fill: #8b949e; }
-    .tooltip { background: #30363d; }
-    .vscroll { border-color: #30363d; }
-    .vscroll .empty { color: #8b949e; }
-    .chip { border-color: #6cb6ff; color: #6cb6ff; }
-    .chartwrap .hit:focus-visible, .chartwrap .hit:hover { fill: rgba(108, 182, 255, .12); outline-color: #6cb6ff; }
-  }
   .pill { display: inline-block; white-space: nowrap; font-size: .72rem; line-height: 1.5;
           padding: 0 .45rem; border: 1px solid; border-radius: 999px; }
-  .pill-supported { color: #1a7f37; border-color: #1a7f37; background: #eaf6ec; }
-  .pill-partial { color: #9a6700; border-color: #9a6700; background: #fff8e6; }
-  .pill-unsupported { color: #b42318; border-color: #b42318; background: #fdecea; }
-  @media (prefers-color-scheme: dark) {
-    .pill-supported { color: #3fb950; border-color: #3fb950; background: #12261a; }
-    .pill-partial { color: #d29922; border-color: #d29922; background: #2a2113; }
-    .pill-unsupported { color: #f85149; border-color: #f85149; background: #2d1618; }
-  }
+  .pill-supported { color: var(--pill-ok-fg); border-color: var(--pill-ok-fg);
+                    background: var(--pill-ok-bg); }
+  .pill-partial { color: var(--pill-partial-fg); border-color: var(--pill-partial-fg);
+                  background: var(--pill-partial-bg); }
+  .pill-unsupported { color: var(--pill-unsupported-fg); border-color: var(--pill-unsupported-fg);
+                      background: var(--pill-unsupported-bg); }
 
   /* Configuration flags: the flag and its argument stay on one line, and the
      purpose column keeps body contrast instead of fading into the table. */
@@ -226,40 +201,32 @@ const STYLES = `
   .ops .flagtable td.purpose { color: inherit; }
   .fidelitymodes td:first-child { width: 7rem; }
   .fidelity-form { display: flex; align-items: center; gap: .6rem; margin: 1rem 0 .25rem; }
-  .fidelity-form label { font-size: .9rem; color: #57606a; }
+  .fidelity-form label { font-size: .9rem; color: var(--muted); }
   .fidelity-form select { font: inherit; font-size: .9rem; padding: .3rem 2rem .3rem .55rem;
-                          border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: inherit; }
+                          border: 1px solid var(--border); border-radius: 6px;
+                          background: var(--input-bg); color: inherit; }
   .fidelity-form select:disabled, .fidelity-form button:disabled { opacity: .55; cursor: not-allowed; }
-  .err-note { border: 1px solid #b42318; background: #fdecea; color: #b42318; border-radius: 6px;
-              padding: .5rem .75rem; margin: .5rem 0 .9rem; }
-  @media (prefers-color-scheme: dark) {
-    .fidelity-form select { background: #161b22; border-color: #30363d; }
-    .err-note { background: #2d1618; border-color: #f85149; color: #f85149; }
-  }
+  .err-note { border: 1px solid var(--danger-fg); background: var(--danger-bg); color: var(--danger-fg);
+              border-radius: 6px; padding: .5rem .75rem; margin: .5rem 0 .9rem; }
 
   /* Settings: the control first, so it is the first thing on the page. */
-  .settings-control { border: 1px solid #d0d7de; border-radius: 10px; background: #f6f8fa;
+  .settings-control { border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
                       padding: 1rem 1.15rem; margin: 1.25rem 0 1.75rem; }
   .settings-control-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
   .settings-control-row label { font-weight: 600; }
   .settings-control select { font: inherit; font-size: 1rem; padding: .4rem 2.2rem .4rem .6rem;
-                             border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: inherit; }
+                             border: 1px solid var(--border); border-radius: 6px;
+                             background: var(--input-bg); color: inherit; }
   .settings-control select:disabled, .settings-control button:disabled { opacity: .55; cursor: not-allowed; }
   .settings-current { margin: .75rem 0 0; }
   .settings-current .muted { margin-left: .35rem; }
-  @media (prefers-color-scheme: dark) {
-    .settings-control { background: #161b22; border-color: #30363d; }
-    .settings-control select { background: #0d1117; border-color: #30363d; }
-  }
 
   /* The rows dropdown above the timings table. */
   .timings-filter { display: flex; align-items: center; gap: .5rem; margin: .6rem 0 .3rem; }
-  .timings-filter label { font-size: .9rem; color: #57606a; }
+  .timings-filter label { font-size: .9rem; color: var(--muted); }
   .timings-filter select { font: inherit; font-size: .9rem; padding: .3rem 2rem .3rem .55rem;
-                           border: 1px solid #d0d7de; border-radius: 6px; background: #fff; color: inherit; }
-  @media (prefers-color-scheme: dark) {
-    .timings-filter select { background: #161b22; border-color: #30363d; }
-  }
+                           border: 1px solid var(--border); border-radius: 6px;
+                           background: var(--input-bg); color: inherit; }
 `;
 
 export type NavKey = 'home' | 'operations' | 'configuration' | 'troubleshooting' | 'self-test' | 'settings';
@@ -375,15 +342,19 @@ export function renderPage({ title, body, version, nav }: PageOptions): string {
   ).join('');
   const script = body.includes('data-tabs') ? `\n${TAB_SCRIPT}` : '';
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-theme-choice="${DEFAULT_THEME}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
-<style>${STYLES}</style>
+<style>${STYLES}${THEME_STYLES}</style>
+${THEME_SCRIPT}
 </head>
 <body>
-<div class="toptag">snowtest ${escapeHtml(PACKAGE_VERSION)} &middot; emulating Snowflake ${escapeHtml(version)}</div>
+<div class="toptag">
+<span>snowtest ${escapeHtml(PACKAGE_VERSION)} &middot; emulating Snowflake ${escapeHtml(version)}</span>
+${renderThemeControl()}
+</div>
 <nav class="topnav" aria-label="Site">${links}</nav>
 ${body}${script}
 </body>

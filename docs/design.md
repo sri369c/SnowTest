@@ -104,11 +104,13 @@ src/
     types.ts       type mapping + per-surface row encoding
     selfcheck.ts   /self-test: checks run through the server HTTP surface
   pages/
-    page.ts        shared HTML shell and stylesheet
+    page.ts        shared HTML shell: escaping, navigation, tabs, layout stylesheet
+    themes.ts      the eleven palettes, the two-column theme menu and the script that
+                   applies one
     home.ts        landing page at / (connect, live catalog state, query timings, clear data)
     operations.ts  supported-operations reference at /operations, from data
     usage.ts       /configuration and /troubleshooting pages
-    fidelity.ts    the Fidelity tab: what each mode does, and the control that applies one
+    fidelity.ts    the Settings page at /settings: what each mode does, and the control that applies one
     browse.ts      catalog browser at /browse
 .snowtest/         per-instance stage directories created by setup.py
 ```
@@ -492,3 +494,6 @@ statement to hang on.
   `driverValue` (`src/http/types.ts`) with the surface's spelling.
 - **New stage capability** → `src/sql/stage.ts` owns the filesystem; the SQL side is
   in `handlePut` / `handleGet` / `handleCopyInto`.
+- **New theme** → a line in `THEMES`, its token block and its swatch class in
+  `src/pages/themes.ts`. The menu, the glyph rule and the stored-choice check
+  all read that list, so nothing else needs touching.
