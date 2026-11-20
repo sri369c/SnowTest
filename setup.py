@@ -531,8 +531,6 @@ def verify_instance(args: argparse.Namespace) -> None:
     It writes to a scratch database it drops again, apart from two rows in the
     fidelity ledger under `model.snowtest_selfcheck.*`.
     """
-    if not args.verify:
-        return
     url = base_url(args) + "/_snowtest/self-test"
     if args.dry_run:
         note(f"  # POST {url}, and fail if any check does")
@@ -541,10 +539,9 @@ def verify_instance(args: argparse.Namespace) -> None:
     try:
         report = http_json(url, method="POST", payload={}, timeout=120.0)
     except urllib.error.HTTPError as exc:
+        # A 409 (a run already in flight) lands here too, and its body names the
+        # reason: nothing was checked either way, which is a failure.
         detail = exc.read().decode(errors="replace")[:300]
-        if exc.code == 409:
-            # Another run holds the latch. That is not a pass: nothing was checked.
-            die(f"could not verify: a self test is already running ({detail})")
         die(f"the self test did not run: HTTP {exc.code} {detail}")
     except (urllib.error.URLError, OSError) as exc:
         die(f"the self test did not run: {exc}")
@@ -552,14 +549,15 @@ def verify_instance(args: argparse.Namespace) -> None:
     checks = report.get("checks") or []
     if not checks:
         die(f"the self test returned no report: {json.dumps(report)[:300]}")
-    for check in checks:
-        if check.get("ok"):
-            continue
+    # The report's `ok` is "no check failed", computed from this same list, so the
+    # list is the only thing worth reading: the checks that are printed and the
+    # checks that are judged cannot then disagree.
+    failed = [check for check in checks if not check.get("ok")]
+    for check in failed:
         note(f"  FAIL  {check.get('name', '?')}: {check.get('passed', '?')}/{check.get('total', '?')} "
              f"{check.get('detail', '')}")
-    if not report.get("ok"):
-        die(f"the self test failed: {report.get('failedChecks', '?')} of {len(checks)} checks, "
-            f"{report.get('passed', '?')}/{report.get('total', '?')} assertions")
+    if failed:
+        die(f"the self test failed: {len(failed)} of {len(checks)} checks")
     note(f"  {report.get('passed')}/{report.get('total')} assertions in {len(checks)} checks "
          f"({report.get('durationMs', '?')} ms)")
 
@@ -725,9 +723,9 @@ def cmd_redeploy(args: argparse.Namespace) -> int:
     else:
         note("the catalog is in memory, so this instance starts empty")
     seed_examples(args)
-    # Before the summary: a build that fails its own checks should end on the
-    # failure, not on a banner saying it is up.
-    verify_instance(args)
+    # Before the summary, so a broken build ends on the failure, not on "up".
+    if args.verify:
+        verify_instance(args)
     print_summary(args, stage, health)
     maybe_write_profile(args)
     return 0
