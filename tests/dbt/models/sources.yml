@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Srinivas Chaturvedula
+
+# fixture.py owns these tables. `customer_state` carries the freshness policy:
+# warn at six hours, fail at a day. `fixture.py stale` ages the rows three days,
+# which is what turns the stale check from decoration into an assertion.
+version: 2
+
+sources:
+  - name: raw
+    database: SNOWTEST
+    schema: DBT_TEST
+    tables:
+      - name: customer_state
+        loaded_at_field: updated_at
+        freshness:
+          warn_after: { count: 6, period: hour }
+          error_after: { count: 24, period: hour }
+      - name: customer_region

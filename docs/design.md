@@ -398,13 +398,11 @@ Consequences, stated plainly:
 
 Verified by `npm run test:dbt`, on the pair pinned in `versions.json`
 (dbt-core 1.12.7, dbt-snowflake 1.12.5): `dbt debug`, `dbt run` (view, table,
-incremental), `dbt seed` twice, `dbt test`, and the stage cycle.
-
-Checked by hand on an earlier pin (dbt-core 1.12.6, dbt-snowflake 1.12.4), and
-not part of the suite: `transient`, `copy_grants`, `cluster_by`,
-`automatic_clustering`, incremental `delete+insert` and `append`, `contract:
-enforced`, `dbt snapshot` (`timestamp` and `check`), `dbt source freshness`,
-`dbt docs generate`, `dbt run-operation`.
+incremental, `append`, `delete+insert`), the `transient`, `copy_grants`,
+`cluster_by` and `automatic_clustering` table configs, `contract: enforced`,
+`dbt seed` twice, `dbt test`, `dbt snapshot` (`timestamp` and `check`),
+`dbt source freshness` against both a fresh and a deliberately stale table,
+`dbt docs generate`, `dbt run-operation`, and the stage cycle.
 Not supported: dynamic tables, materialized views, Python models, clone,
 Iceberg. `grants:` runs, with the grants recorded and never enforced.
 
@@ -442,7 +440,7 @@ pin the connector named in `versions.json` (4.8.1):
 flowchart LR
   A["npm test<br/>vitest"] --> A1["dialect rules, engine behaviour,<br/>persistence, config, pages"]
   B["npm run test:py"] --> B1["connector 4.8.1 (pinned)<br/>handshake, types, errors"]
-  C["npm run test:dbt"] --> C1["dbt 1.12 + key-pair<br/>debug, run x2, seed x2, test"]
+  C["npm run test:dbt"] --> C1["dbt 1.12 + key-pair<br/>debug, run x2, seed x2, test,<br/>snapshot, freshness, docs"]
   C --> C2["verify.py<br/>results + wrong-key rejection"]
   C --> C3["stage_test.py<br/>PUT, LIST, COPY, GET, REMOVE"]
 ```
@@ -451,7 +449,7 @@ flowchart LR
 |---|---|
 | `npm test` | translation rules in isolation, plus each rule run against DuckDB through the SQL API (contracts, rename/swap, conversions, column case, restart persistence, reset) |
 | `npm run test:py` | login, DDL/DML, Python type fidelity, `DESCRIBE`, `SHOW`, variant access, binds, error codes, SQL API v2 async, isolation, reconnect |
-| `npm run test:dbt` | a real transformation tool runs end to end over key-pair auth, including a second run (merge) and a second seed (overwrite must not duplicate) |
+| `npm run test:dbt` | a real transformation tool runs end to end over key-pair auth, including a second run (merge, append, delete+insert), a second seed (overwrite must not duplicate), both snapshot strategies against a changed row, source freshness in both directions, the docs catalog, and `run-operation` |
 
 **Harness hazard worth recording:** the runners build and exec
 `node dist/cli.js` directly. `npx tsx` spawns a child process, so killing the

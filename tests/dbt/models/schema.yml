@@ -19,3 +19,15 @@ models:
       - name: order_id
         tests:
           - unique
+  # An enforced contract refuses to run unless every column is declared with a
+  # data_type; these are the types its CREATE is built from.
+  - name: contracted_orders
+    columns:
+      - name: order_id
+        data_type: number(10,0)
+        tests:
+          - not_null
+      - name: customer_name
+        data_type: varchar(64)
+      - name: amount
+        data_type: number(10,2)

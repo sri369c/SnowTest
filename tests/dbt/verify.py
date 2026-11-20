@@ -6,6 +6,7 @@ Reuses the same private key dbt signed with, so a pass here proves both that the
 JWT is accepted and that the transformations really ran.
 """
 
+import json
 import os
 import sys
 
@@ -66,6 +67,50 @@ with connect() as conn:
     check("incremental model has unique keys", lambda: assert_eq(scalar(conn, "select count(*) from (select order_id from SNOWTEST.DBT_TEST.ORDER_LEDGER group by order_id having count(*) > 1)"), 0, "duplicates"))
     check("dbt seed loaded every row", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.SEED_CUSTOMERS"), 3, "rows"))
     check("seed boolean column round-trips", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.SEED_CUSTOMERS where is_active = true"), 2, "active rows"))
+
+    # The models that exist for a table config or an incremental strategy.
+    check("transient + copy_grants table kept every row", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.SNOWFLAKE_TABLE_CONFIGS"), 3, "rows"))
+    check("clustered table kept every row", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.CLUSTERED_ORDERS"), 3, "rows"))
+    check("contract-enforced table kept every row", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.CONTRACTED_ORDERS"), 3, "rows"))
+    check("append strategy inserted a second copy", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.APPEND_LEDGER"), 6, "rows after two runs"))
+    check("delete+insert strategy did not duplicate", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.DELETE_INSERT_LEDGER"), 3, "rows after two runs"))
+
+    # Snapshots: fixture.py changed exactly one key after the first snapshot, so a
+    # correct run holds one closed version beside three current ones.
+    check("timestamp snapshot recorded a second version", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.CUSTOMER_SNAPSHOT"), 4, "rows"))
+    check("timestamp snapshot has three current rows", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.CUSTOMER_SNAPSHOT where dbt_valid_to is null"), 3, "current rows"))
+    check("timestamp snapshot closed the changed version", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.CUSTOMER_SNAPSHOT where customer_id = 1 and dbt_valid_to is not null"), 1, "closed rows"))
+    check("timestamp snapshot carries the changed value", lambda: assert_eq(scalar(conn, "select customer_name from SNOWTEST.DBT_TEST.CUSTOMER_SNAPSHOT where customer_id = 1 and dbt_valid_to is null"), "acme-renamed", "current name"))
+    check("check snapshot recorded a second version", lambda: assert_eq(scalar(conn, "select count(*) from SNOWTEST.DBT_TEST.REGION_SNAPSHOT"), 4, "rows"))
+    check("check snapshot carries the changed value", lambda: assert_eq(scalar(conn, "select region from SNOWTEST.DBT_TEST.REGION_SNAPSHOT where customer_id = 1 and dbt_valid_to is null"), "apac", "current region"))
+
+CATALOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "target", "catalog.json")
+
+
+def docs_catalog() -> None:
+    """`dbt docs generate` reads the catalog over the wire; this is that file."""
+    with open(CATALOG, encoding="utf-8") as handle:
+        nodes = json.load(handle).get("nodes", {})
+    wanted = [
+        "model.snowtest_demo.stg_orders",
+        "model.snowtest_demo.contracted_orders",
+        "model.snowtest_demo.clustered_orders",
+        "model.snowtest_demo.snowflake_table_configs",
+        "model.snowtest_demo.append_ledger",
+        "model.snowtest_demo.delete_insert_ledger",
+        "snapshot.snowtest_demo.customer_snapshot",
+        "snapshot.snowtest_demo.region_snapshot",
+        "seed.snowtest_demo.seed_customers",
+    ]
+    missing = [name for name in wanted if name not in nodes]
+    if missing:
+        raise AssertionError(f"catalog is missing {', '.join(missing)}")
+    columns = nodes["model.snowtest_demo.stg_orders"].get("columns", {})
+    if len(columns) < 5:
+        raise AssertionError(f"stg_orders has {len(columns)} columns in the catalog, expected 5")
+
+
+check("docs catalog covers the models and their columns", docs_catalog)
 
 if BAD_KEY:
     def reject_wrong_key() -> None:
